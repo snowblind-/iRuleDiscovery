@@ -27,6 +27,32 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+
+def _load_env_file(path: Path | None = None) -> None:
+    """
+    Load a .env file into os.environ (only sets variables not already set).
+    Looks for .env in the script's directory by default.
+    Lines starting with # are comments; blank lines are skipped.
+    """
+    env_path = path or (Path(__file__).parent / ".env")
+    if not env_path.exists():
+        return
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key   = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_env_file()
+
+
 # F5 Distributed Cloud REST endpoints
 _XC_BASE          = "https://{tenant}.console.ves.volterra.io"
 _XC_AI_URL        = _XC_BASE + "/api/gen-ai/namespaces/{namespace}/query"
