@@ -64,6 +64,9 @@ _IRD_SOURCE_LABEL = "irule-discovery"
 # Registry file name (written alongside manifest.json)
 _REGISTRY_FILE    = "upload_registry.json"
 
+# AI analysis cache file — keyed by content_hash::provider::model
+_AI_CACHE_FILE    = "ai_analysis_cache.json"
+
 # Minimum seconds between AI query requests (XC rate-limit guidance)
 _XC_AI_RATE_LIMIT = 20
 
@@ -509,6 +512,32 @@ def save_upload_registry(out_dir: Path, registry: dict) -> None:
     os.replace(tmp_path, path)
 
 
+def _ai_cache_key(content_hash_val: str, provider: str, model: str | None) -> str:
+    """Stable key used to look up cached AI analyses."""
+    return f"{content_hash_val}::{provider}::{model or ''}"
+
+
+def load_ai_cache(out_dir: Path) -> dict:
+    """Load ai_analysis_cache.json; return empty cache if absent or corrupt."""
+    path = out_dir / _AI_CACHE_FILE
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and "entries" in data:
+                return data
+        except Exception:
+            pass
+    return {"version": 1, "entries": {}}
+
+
+def save_ai_cache(out_dir: Path, cache: dict) -> None:
+    """Write AI analysis cache atomically (temp-file rename)."""
+    path     = out_dir / _AI_CACHE_FILE
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(cache, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp_path, path)
+
+
 def load_hosts_file(path: str) -> list[str]:
     hosts = []
     for line in Path(path).read_text().splitlines():
@@ -612,30 +641,55 @@ def discover_device(host: str, username: str, password: str,
     return {"host": host, "error": None, "virtual_servers": vs_list}
 
 
-def ai_enrich_irules(irules_data: dict, irules_dir: Path, ai_cfg: dict) -> None:
+def ai_enrich_irules(irules_data: dict, irules_dir: Path, ai_cfg: dict,
+                     out_dir: Path | None = None) -> None:
     """
     Phase 2 — query the configured AI provider for each downloaded iRule.
-    Runs after all BIG-IP downloads are complete.
+    Skips iRules whose content hash already has a cached analysis for this
+    provider/model combination.  Cache is saved after every new analysis.
     Rate-limited to ai_cfg['rate_limit'] seconds between requests (XC default).
     """
     provider = ai_cfg.get("provider", "xc")
     model    = ai_cfg.get("model") or _AI_DEFAULT_MODELS.get(provider)
     label    = f"{provider}" + (f"/{model}" if model else "")
 
+    # Load persisted analysis cache (keyed by content_hash::provider::model)
+    cache_dir     = out_dir or irules_dir.parent
+    ai_cache      = load_ai_cache(cache_dir)
+    cache_entries = ai_cache["entries"]
+
     keys  = [k for k, v in irules_data.items() if v.get("file")]  # skip failed fetches
     total = len(keys)
-    print(f"\n[AI] Querying {label} for {total} iRule(s) …")
+
+    # Split into cached vs needs-query
+    to_query  = []
+    for key in keys:
+        entry  = irules_data[key]
+        chash  = entry.get("content_hash")
+        ckey   = _ai_cache_key(chash, provider, model) if chash else None
+        if ckey and ckey in cache_entries:
+            # Reuse cached result — no API call needed
+            entry["ai_analysis"] = cache_entries[ckey]
+        else:
+            to_query.append((key, ckey))
+
+    cached_count = total - len(to_query)
+    print(f"\n[AI] {label} — {total} iRule(s): "
+          f"{cached_count} cached, {len(to_query)} to query")
+
+    if not to_query:
+        return
 
     rate_limit   = ai_cfg.get("rate_limit", _XC_AI_RATE_LIMIT if provider == "xc" else 0)
     last_ai_call: float = 0.0
 
-    for idx, key in enumerate(keys, 1):
+    for idx, (key, ckey) in enumerate(to_query, 1):
         entry     = irules_data[key]
         rule_path = entry["path"]
         code      = entry["code"]
         host      = entry["host"]
 
-        print(f"  [{idx}/{total}] {rule_path}")
+        print(f"  [{idx}/{len(to_query)}] {rule_path}")
 
         elapsed = time.time() - last_ai_call
         if last_ai_call and elapsed < rate_limit:
@@ -658,6 +712,10 @@ def ai_enrich_irules(irules_data: dict, irules_dir: Path, ai_cfg: dict) -> None:
             afpath = irules_dir / afname
             afpath.write_text(ai_result["analysis"], encoding="utf-8")
             entry["ai_analysis_file"] = str(afpath)
+            # Cache successful analyses; save after every result
+            if ckey:
+                cache_entries[ckey] = ai_result
+                save_ai_cache(cache_dir, ai_cache)
         else:
             print(f"FAILED\n         {ai_result['analysis']}")
 
@@ -1760,7 +1818,7 @@ def main() -> None:
         print(f"\n{'─'*55}")
         print(f"  Phase 2 — AI analysis via {label}{rl_note}")
         print(f"{'─'*55}")
-        ai_enrich_irules(irules_data, irules_dir, ai_cfg)
+        ai_enrich_irules(irules_data, irules_dir, ai_cfg, out_dir=out_dir)
 
     # ── Phase 3: XC iRule library upload ────────────────────────────────────
     if xc_cfg and args.upload:

@@ -4,3 +4,5 @@ __pycache__/
 irule_output/
 .env
 *.env
+ai_analysis_cache.json
+upload_registry.json
