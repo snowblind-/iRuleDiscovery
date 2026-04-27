@@ -691,13 +691,22 @@ def db_record_stats(conn: sqlite3.Connection, content_hash: str, host: str,
 
 
 def db_get_stats_history(conn: sqlite3.Connection, content_hash: str,
-                         limit: int = 30) -> list[dict]:
-    """Return the last `limit` stat snapshots for a content hash, oldest first."""
+                         limit: int = 100) -> list[dict]:
+    """
+    Return the last `limit` stat snapshots for a content hash, oldest first.
+    Each entry includes delta_executions = executions since the previous snapshot,
+    giving a rate-per-interval view rather than a monotone cumulative counter.
+    Counter resets (device reboot) are clamped to 0.
+    """
     rows = conn.execute(
         "SELECT run_at, total_executions, failures, aborts FROM irule_stats "
         "WHERE content_hash=? ORDER BY run_at DESC LIMIT ?",
         (content_hash, limit)).fetchall()
-    return [dict(r) for r in reversed(rows)]
+    history = [dict(r) for r in reversed(rows)]
+    for i, entry in enumerate(history):
+        prev = history[i - 1]["total_executions"] if i > 0 else entry["total_executions"]
+        entry["delta_executions"] = max(0, entry["total_executions"] - prev)
+    return history
 
 
 def load_hosts_file(path: str) -> list[str]:
@@ -1339,28 +1348,31 @@ function statusColor(s) {
   return s==='error'?'#ef4444':s==='orphan'?'#eab308':s==='active'?'#4ade80':'#38bdf8';
 }
 
-function sparkline(history, w=160, h=38) {
-  if (!history || history.length === 0) return '';
-  const vals = history.map(h => h.total_executions);
+function sparkline(history, w=160, h=42) {
+  if (!history || history.length < 2) return '';
+  // Use delta_executions (rate per interval) if present, else fall back to cumulative
+  const vals   = history.map(h => h.delta_executions !== undefined ? h.delta_executions : h.total_executions);
   const allZero = vals.every(v => v === 0);
-  if (allZero && history.length < 2) return '';
-  const mx   = Math.max(...vals, 1);
+  if (allZero) return '<div style="color:#374151;font-size:0.65rem;margin-top:4px">no executions recorded</div>';
+  const mx     = Math.max(...vals, 1);
   const hasErr = history.some(h => h.failures > 0 || h.aborts > 0);
-  const lc   = hasErr ? '#f87171' : '#4ade80';
-  const ac   = hasErr ? 'rgba(248,113,113,0.12)' : 'rgba(74,222,128,0.12)';
-
-  if (vals.length === 1) {
-    return `<svg width="${w}" height="${h}" style="display:block;margin-top:5px">
-      <circle cx="${w/2}" cy="${h/2-4}" r="3" fill="${lc}"/>
-      <text x="${w/2+6}" y="${h/2}" font-size="8.5" fill="#64748b">${vals[0].toLocaleString()} exec</text>
-    </svg>`;
-  }
-  const pts  = vals.map((v,i)=>`${(2+(i/(vals.length-1))*(w-4)).toFixed(1)},${(h-8-((v/mx)*(h-16))+4).toFixed(1)}`);
-  const last = pts[pts.length-1].split(',');
-  const area = `2,${h-4} ${pts.join(' ')} ${last[0]},${h-4}`;
-  const d0   = history[0].run_at.slice(0,10);
-  const dN   = history[history.length-1].run_at.slice(0,10);
+  const lc     = hasErr ? '#f87171' : '#4ade80';
+  const ac     = hasErr ? 'rgba(248,113,113,0.12)' : 'rgba(74,222,128,0.12)';
+  const TPAD   = 10;  // top padding for label
+  const BPAD   = 12;  // bottom padding for date labels
+  const plotH  = h - TPAD - BPAD;
+  const pts    = vals.map((v,i)=>{
+    const x = (2 + (i/(vals.length-1))*(w-4)).toFixed(1);
+    const y = (TPAD + plotH - (v/mx)*plotH).toFixed(1);
+    return `${x},${y}`;
+  });
+  const last   = pts[pts.length-1].split(',');
+  const area   = `2,${TPAD+plotH} ${pts.join(' ')} ${last[0]},${TPAD+plotH}`;
+  const d0     = history[0].run_at.slice(0,10);
+  const dN     = history[history.length-1].run_at.slice(0,10);
+  const peak   = Math.max(...vals);
   return `<svg width="${w}" height="${h}" style="display:block;margin-top:5px">
+    <text x="${w-1}" y="8" font-size="7.5" fill="#475569" text-anchor="end">peak ${peak.toLocaleString()}/interval</text>
     <polygon points="${area}" fill="${ac}"/>
     <polyline points="${pts.join(' ')}" fill="none" stroke="${lc}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
     <text x="1" y="${h-1}" font-size="7.5" fill="#374151">${d0}</text>
@@ -1497,8 +1509,11 @@ nodeSel.append('circle')
       html += '</div>';
       const s = d.stats;
       if (s) {
+        const lastDelta = d.stats_history && d.stats_history.length > 0
+          ? d.stats_history[d.stats_history.length-1].delta_executions : undefined;
         html += `<div style="font-size:0.7rem;color:#94a3b8">`;
-        html += `Exec: <b style="color:#e2e8f0">${s.total_executions.toLocaleString()}</b>`;
+        html += `Total: <b style="color:#e2e8f0">${s.total_executions.toLocaleString()}</b>`;
+        if (lastDelta !== undefined) html += ` <span style="color:#64748b">· last: ${lastDelta.toLocaleString()}/interval</span>`;
         if (s.failures) html += ` <span style="color:#f87171">· Fail: ${s.failures}</span>`;
         if (s.aborts)   html += ` <span style="color:#fb923c">· Abort: ${s.aborts}</span>`;
         html += '</div>';
