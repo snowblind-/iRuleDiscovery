@@ -2045,12 +2045,24 @@ function makeVResize(handle, pane, container) {
 }
 
 // ── Tab switching ────────────────────────────────────────────────────────────
+let forceEverShown = false;
+
 function switchTab(name) {
   document.getElementById('pane-force').style.display  = name === 'force'  ? 'flex' : 'none';
   document.getElementById('pane-sankey').classList.toggle('active', name === 'sankey');
   document.getElementById('pane-fleet').classList.toggle('active',  name === 'fleet');
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.getElementById('tab-' + name).classList.add('active');
+  if (name === 'force' && !forceEverShown) {
+    forceEverShown = true;
+    // Pane was hidden at script load so W/H were 0. Read true dimensions now
+    // and give the sim a full restart so nodes spread into the real viewport.
+    requestAnimationFrame(() => {
+      W = panel.clientWidth;
+      H = panel.clientHeight;
+      sim.force('center', d3.forceCenter(W / 2, H / 2)).alpha(1).restart();
+    });
+  }
   if (name === 'sankey' && !sankeyBuilt) buildSankey();
   if (name === 'fleet'  && !fleetBuilt)  buildFleet();
 }
@@ -2090,17 +2102,31 @@ function buildFleetData() {
 }
 
 function focusDevice(host) {
-  switchTab('force');
-  requestAnimationFrame(() => {
+  const firstTime = !forceEverShown;
+  switchTab('force');   // may trigger sim restart on first visit
+
+  function doZoom() {
+    W = panel.clientWidth;
+    H = panel.clientHeight;
     const n = nodes.find(d => d.type === 'device' && d.label === host);
-    if (!n || n.x == null) return;
+    if (!n) return;
+    // If the sim just started (first visit) nodes are still moving — use a
+    // short settled delay so node.x/y reflect the in-progress layout.
+    const nx = (n.x != null && Math.abs(n.x) > 1) ? n.x : W / 2;
+    const ny = (n.y != null && Math.abs(n.y) > 1) ? n.y : H / 2;
     const scale = 1.8;
-    const tx = W / 2 - n.x * scale;
-    const ty = H / 2 - n.y * scale;
     svg.transition().duration(650)
-       .call(zoomBehavior.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
+       .call(zoomBehavior.transform,
+             d3.zoomIdentity.translate(W / 2 - nx * scale, H / 2 - ny * scale).scale(scale));
     selectNode(n);
-  });
+  }
+
+  if (firstTime) {
+    // Give the sim ~400 ms to spread nodes into the real viewport before zooming
+    setTimeout(doZoom, 400);
+  } else {
+    requestAnimationFrame(doZoom);
+  }
 }
 
 function buildFleet() {
