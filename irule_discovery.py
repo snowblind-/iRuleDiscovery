@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import sys
 import time
 import webbrowser
@@ -61,11 +62,12 @@ _XC_IRULE_URL     = _XC_BASE + "/api/config/namespaces/{namespace}/irules"
 # Source label stamped on every iRule uploaded by this tool
 _IRD_SOURCE_LABEL = "irule-discovery"
 
-# Registry file name (written alongside manifest.json)
+# Legacy JSON file names (kept only for one-time migration to SQLite)
 _REGISTRY_FILE    = "upload_registry.json"
-
-# AI analysis cache file — keyed by content_hash::provider::model
 _AI_CACHE_FILE    = "ai_analysis_cache.json"
+
+# SQLite database (single file, replaces both JSON registries)
+_DB_FILE          = "irule_discovery.db"
 
 # Minimum seconds between AI query requests (XC rate-limit guidance)
 _XC_AI_RATE_LIMIT = 20
@@ -108,13 +110,54 @@ def _decode_bigip_string(s: str) -> str:
 
 def get_irule_content(session: requests.Session, host: str, rule_path: str) -> str:
     """Fetch iRule TCL source. rule_path is like /Common/my_rule."""
-    # BIG-IP iControl REST partition encoding: /Common/my_rule → ~Common~my_rule
     encoded = rule_path.replace("/", "~")
     url = f"https://{host}/mgmt/tm/ltm/rule/{encoded}"
     resp = session.get(url, timeout=30)
     resp.raise_for_status()
     raw = resp.json().get("apiAnonymous", "")
     return _decode_bigip_string(raw)
+
+
+def get_all_irule_paths(session: requests.Session, host: str,
+                        partition: str | None = None) -> list[str]:
+    """Return fullPath of every iRule defined on the device (for orphan detection)."""
+    url    = f"https://{host}/mgmt/tm/ltm/rule"
+    params: dict = {"$select": "fullPath,partition"}
+    resp = session.get(url, params=params, timeout=30)
+    resp.raise_for_status()
+    paths = [item["fullPath"] for item in resp.json().get("items", [])]
+    if partition:
+        paths = [p for p in paths if p.split("/")[1] == partition
+                 if len(p.split("/")) > 1]
+    return paths
+
+
+def get_irule_stats(session: requests.Session, host: str,
+                    rule_path: str) -> dict:
+    """
+    Fetch execution statistics for one iRule from BIG-IP.
+    Aggregates across all events.
+    Returns {"total_executions": int, "failures": int, "aborts": int, "events": dict}.
+    """
+    encoded = rule_path.replace("/", "~")
+    url     = f"https://{host}/mgmt/tm/ltm/rule/{encoded}/stats"
+    try:
+        resp = session.get(url, timeout=30)
+        if not resp.ok:
+            return {"total_executions": 0, "failures": 0, "aborts": 0, "events": {}}
+        total_exec = 0; failures = 0; aborts = 0; events: dict = {}
+        for entry_key, entry_val in resp.json().get("entries", {}).items():
+            nested = entry_val.get("nestedStats", {}).get("entries", {})
+            ev = entry_key.rsplit(":", 1)[-1] if ":" in entry_key else entry_key
+            t  = nested.get("totalExecutions", {}).get("value", 0)
+            f  = nested.get("failures",        {}).get("value", 0)
+            a  = nested.get("aborts",          {}).get("value", 0)
+            total_exec += t; failures += f; aborts += a
+            events[ev] = {"total_executions": t, "failures": f, "aborts": a}
+        return {"total_executions": total_exec, "failures": failures,
+                "aborts": aborts, "events": events}
+    except Exception:
+        return {"total_executions": 0, "failures": 0, "aborts": 0, "events": {}}
 
 
 # ── AI analysis — multi-provider ─────────────────────────────────────────────
@@ -376,10 +419,11 @@ def xc_upload_irule(tenant: str, namespace: str, api_token: str,
     return {"status": "failed", "xc_name": name, "detail": "max retries exceeded"}
 
 
-def xc_upload_irules(irules_data: dict, out_dir: Path, xc_cfg: dict) -> None:
+def xc_upload_irules(irules_data: dict, out_dir: Path, xc_cfg: dict,
+                     db_conn: sqlite3.Connection) -> None:
     """
     Phase 3 — upload iRules to the XC iRules library.
-    Deduplicates by content hash; never re-uploads content already in the registry.
+    Deduplicates by content hash; registry is stored in SQLite.
     Updates each irules_data entry with a 'xc_library' field after the run.
     """
     import datetime
@@ -388,24 +432,22 @@ def xc_upload_irules(irules_data: dict, out_dir: Path, xc_cfg: dict) -> None:
     api_token = xc_cfg["api_token"]
     log       = logging.getLogger(__name__)
 
-    registry = load_upload_registry(out_dir)
-    entries  = registry["entries"]
+    entries = db_load_upload_registry(db_conn)
 
-    # ── Sync: pull existing XC library iRules into registry ──
+    # ── Sync: pull existing XC library iRules into DB ──
     print("  [XC] Scanning iRule library for existing uploads …", end=" ", flush=True)
     xc_existing = xc_list_library_irules(tenant, namespace, api_token)
     synced = 0
     for chash, info in xc_existing.items():
         if chash not in entries:
-            entries[chash] = {**info, "source": "sync",
-                               "uploaded_at": datetime.datetime.utcnow().isoformat() + "Z"}
+            entry_data = {**info, "source": "sync",
+                          "uploaded_at": datetime.datetime.utcnow().isoformat() + "Z"}
+            db_save_upload(db_conn, chash, entry_data)
+            entries[chash] = entry_data
             synced += 1
-    print(f"{len(xc_existing)} found in library ({synced} new to local registry)")
-    if synced:
-        save_upload_registry(out_dir, registry)
+    print(f"{len(xc_existing)} found in library ({synced} new to registry)")
 
     # ── Choose one representative per unique hash ──
-    # Sort keys deterministically so the same rule is chosen across re-runs.
     hash_to_rep: dict[str, str] = {}
     for key, entry in irules_data.items():
         chash = entry.get("content_hash")
@@ -415,7 +457,7 @@ def xc_upload_irules(irules_data: dict, out_dir: Path, xc_cfg: dict) -> None:
         if chash not in hash_to_rep:
             hash_to_rep[chash] = all_keys[0]
 
-    already  = sum(1 for h in hash_to_rep if h in entries)
+    already   = sum(1 for h in hash_to_rep if h in entries)
     to_upload = [(h, key) for h, key in hash_to_rep.items() if h not in entries]
 
     print(f"\n  {len(to_upload)} to upload · {already} already in registry "
@@ -432,28 +474,30 @@ def xc_upload_irules(irules_data: dict, out_dir: Path, xc_cfg: dict) -> None:
 
         if result["status"] == "success":
             print(f"ok → {result['xc_name']}")
-            entries[chash] = {
+            entry_data = {
                 "xc_name":      result["xc_name"],
                 "xc_namespace": namespace,
                 "uploaded_at":  datetime.datetime.utcnow().isoformat() + "Z",
                 "origin_host":  host,
                 "origin_path":  rule_path,
                 "manifest_key": key,
+                "source":       _IRD_SOURCE_LABEL,
             }
+            db_save_upload(db_conn, chash, entry_data)
+            entries[chash] = entry_data
         elif result["status"] == "exists":
             print(f"skipped — {result['detail']}")
         else:
             print(f"FAILED — {result['detail']}")
             log.debug("upload error for %s: %s", key, result["detail"])
 
-        save_upload_registry(out_dir, registry)   # save after every attempt
-
     # ── Back-fill xc_library on every irules_data entry ──
+    entries = db_load_upload_registry(db_conn)   # re-read after any inserts
     for key, entry in irules_data.items():
         chash = entry.get("content_hash")
         entry["xc_library"] = entries.get(chash) if chash else None
 
-    print(f"\n[+] Upload registry → {out_dir / _REGISTRY_FILE}")
+    print(f"\n[+] Upload registry → {out_dir / _DB_FILE}")
 
 
 # ── File helpers ──────────────────────────────────────────────────────────────
@@ -490,52 +534,161 @@ def xc_irule_name(rule_path: str) -> str:
     return f"ird--{raw}"[:63]
 
 
-def load_upload_registry(out_dir: Path) -> dict:
-    """Load upload_registry.json; return empty registry if absent or corrupt."""
-    path = out_dir / _REGISTRY_FILE
-    if path.exists():
+# ── SQLite database ───────────────────────────────────────────────────────────
+
+def open_db(out_dir: Path) -> sqlite3.Connection:
+    """Open (or create) the local SQLite database with WAL mode."""
+    conn = sqlite3.connect(out_dir / _DB_FILE, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    return conn
+
+
+def init_db(conn: sqlite3.Connection) -> None:
+    """Create tables if they don't already exist."""
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS upload_registry (
+        content_hash  TEXT PRIMARY KEY,
+        xc_name       TEXT NOT NULL,
+        xc_namespace  TEXT NOT NULL,
+        origin_host   TEXT,
+        origin_path   TEXT,
+        manifest_key  TEXT,
+        uploaded_at   TEXT NOT NULL,
+        source        TEXT DEFAULT 'irule-discovery'
+    );
+
+    CREATE TABLE IF NOT EXISTS ai_cache (
+        cache_key    TEXT PRIMARY KEY,
+        status       TEXT NOT NULL,
+        analysis     TEXT,
+        provider     TEXT,
+        model        TEXT,
+        analyzed_at  TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS irule_stats (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        content_hash      TEXT NOT NULL,
+        host              TEXT NOT NULL,
+        rule_path         TEXT NOT NULL,
+        run_at            TEXT NOT NULL,
+        total_executions  INTEGER NOT NULL DEFAULT 0,
+        failures          INTEGER NOT NULL DEFAULT 0,
+        aborts            INTEGER NOT NULL DEFAULT 0,
+        events_json       TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_stats_hash ON irule_stats(content_hash, run_at);
+    """)
+    conn.commit()
+
+
+def _migrate_json_to_db(conn: sqlite3.Connection, out_dir: Path) -> None:
+    """One-time migration of legacy JSON files into the SQLite DB."""
+    import datetime
+    now = datetime.datetime.utcnow().isoformat() + "Z"
+
+    reg_path = out_dir / _REGISTRY_FILE
+    if reg_path.exists():
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(data, dict) and "entries" in data:
-                return data
-        except Exception:
-            pass
-    return {"version": 1, "entries": {}}
+            data = json.loads(reg_path.read_text(encoding="utf-8"))
+            for chash, e in data.get("entries", {}).items():
+                conn.execute(
+                    "INSERT OR IGNORE INTO upload_registry "
+                    "(content_hash,xc_name,xc_namespace,origin_host,origin_path,"
+                    " manifest_key,uploaded_at,source) VALUES (?,?,?,?,?,?,?,?)",
+                    (chash, e.get("xc_name",""), e.get("xc_namespace",""),
+                     e.get("origin_host"), e.get("origin_path"),
+                     e.get("manifest_key"), e.get("uploaded_at", now),
+                     e.get("source", _IRD_SOURCE_LABEL)))
+            conn.commit()
+            reg_path.rename(reg_path.with_suffix(".json.migrated"))
+            print(f"[~] Migrated {reg_path.name} → upload_registry table")
+        except Exception as exc:
+            logging.getLogger(__name__).debug("upload_registry migration error: %s", exc)
+
+    cache_path = out_dir / _AI_CACHE_FILE
+    if cache_path.exists():
+        try:
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+            for ckey, e in data.get("entries", {}).items():
+                conn.execute(
+                    "INSERT OR IGNORE INTO ai_cache "
+                    "(cache_key,status,analysis,provider,model,analyzed_at) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (ckey, e.get("status",""), e.get("analysis",""),
+                     e.get("provider"), e.get("model"), now))
+            conn.commit()
+            cache_path.rename(cache_path.with_suffix(".json.migrated"))
+            print(f"[~] Migrated {cache_path.name} → ai_cache table")
+        except Exception as exc:
+            logging.getLogger(__name__).debug("ai_cache migration error: %s", exc)
 
 
-def save_upload_registry(out_dir: Path, registry: dict) -> None:
-    """Write registry atomically (temp-file rename)."""
-    import os
-    path     = out_dir / _REGISTRY_FILE
-    tmp_path = path.with_suffix(".tmp")
-    tmp_path.write_text(json.dumps(registry, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp_path, path)
+def db_load_upload_registry(conn: sqlite3.Connection) -> dict:
+    """Return {content_hash: entry_dict} for all uploaded iRules."""
+    return {row["content_hash"]: dict(row)
+            for row in conn.execute("SELECT * FROM upload_registry").fetchall()}
+
+
+def db_save_upload(conn: sqlite3.Connection, chash: str, entry: dict) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO upload_registry "
+        "(content_hash,xc_name,xc_namespace,origin_host,origin_path,"
+        " manifest_key,uploaded_at,source) VALUES (?,?,?,?,?,?,?,?)",
+        (chash, entry.get("xc_name",""), entry.get("xc_namespace",""),
+         entry.get("origin_host"), entry.get("origin_path"),
+         entry.get("manifest_key"), entry.get("uploaded_at",""),
+         entry.get("source", _IRD_SOURCE_LABEL)))
+    conn.commit()
 
 
 def _ai_cache_key(content_hash_val: str, provider: str, model: str | None) -> str:
-    """Stable key used to look up cached AI analyses."""
+    """Stable lookup key for the ai_cache table."""
     return f"{content_hash_val}::{provider}::{model or ''}"
 
 
-def load_ai_cache(out_dir: Path) -> dict:
-    """Load ai_analysis_cache.json; return empty cache if absent or corrupt."""
-    path = out_dir / _AI_CACHE_FILE
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(data, dict) and "entries" in data:
-                return data
-        except Exception:
-            pass
-    return {"version": 1, "entries": {}}
+def db_get_ai_result(conn: sqlite3.Connection, cache_key: str) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM ai_cache WHERE cache_key=?", (cache_key,)).fetchone()
+    return dict(row) if row else None
 
 
-def save_ai_cache(out_dir: Path, cache: dict) -> None:
-    """Write AI analysis cache atomically (temp-file rename)."""
-    path     = out_dir / _AI_CACHE_FILE
-    tmp_path = path.with_suffix(".tmp")
-    tmp_path.write_text(json.dumps(cache, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp_path, path)
+def db_save_ai_result(conn: sqlite3.Connection, cache_key: str,
+                      result: dict) -> None:
+    import datetime
+    conn.execute(
+        "INSERT OR REPLACE INTO ai_cache "
+        "(cache_key,status,analysis,provider,model,analyzed_at) "
+        "VALUES (?,?,?,?,?,?)",
+        (cache_key, result.get("status",""), result.get("analysis",""),
+         result.get("provider"), result.get("model"),
+         datetime.datetime.utcnow().isoformat()+"Z"))
+    conn.commit()
+
+
+def db_record_stats(conn: sqlite3.Connection, content_hash: str, host: str,
+                    rule_path: str, run_at: str, total_executions: int,
+                    failures: int, aborts: int,
+                    events_json: str | None = None) -> None:
+    conn.execute(
+        "INSERT INTO irule_stats "
+        "(content_hash,host,rule_path,run_at,total_executions,failures,aborts,events_json) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (content_hash, host, rule_path, run_at,
+         total_executions, failures, aborts, events_json))
+    conn.commit()
+
+
+def db_get_stats_history(conn: sqlite3.Connection, content_hash: str,
+                         limit: int = 30) -> list[dict]:
+    """Return the last `limit` stat snapshots for a content hash, oldest first."""
+    rows = conn.execute(
+        "SELECT run_at, total_executions, failures, aborts FROM irule_stats "
+        "WHERE content_hash=? ORDER BY run_at DESC LIMIT ?",
+        (content_hash, limit)).fetchall()
+    return [dict(r) for r in reversed(rows)]
 
 
 def load_hosts_file(path: str) -> list[str]:
@@ -606,70 +759,92 @@ def discover_device(host: str, username: str, password: str,
             "rule_keys": [irule_key(host, r) for r in rules],
         })
 
-    print(f"[+] {host}: {len(all_rule_paths)} unique iRule(s)")
+    print(f"[+] {host}: {len(all_rule_paths)} unique iRule(s) attached to VS")
 
-    for rule_path in sorted(all_rule_paths):
-        key = irule_key(host, rule_path)
-        if key in irules_data:
-            continue
+    # ── Orphan detection: all iRules on device vs VS-attached ───────────────
+    try:
+        device_paths = get_all_irule_paths(session, host, partition)
+        orphan_paths = set(device_paths) - all_rule_paths
+        if orphan_paths:
+            print(f"[+] {host}: {len(orphan_paths)} orphan iRule(s) not attached to any VS")
+    except Exception as exc:
+        logging.getLogger(__name__).debug("Orphan detection failed for %s: %s", host, exc)
+        orphan_paths = set()
 
-        print(f"  [*] {host}: fetching {rule_path} …", end=" ", flush=True)
-        try:
-            code = get_irule_content(session, host, rule_path)
-        except requests.HTTPError as exc:
-            print(f"FAILED ({exc.response.status_code})")
+    # ── Fetch code + stats for attached and orphan iRules ───────────────────
+    for rule_path in sorted(all_rule_paths | orphan_paths):
+        key       = irule_key(host, rule_path)
+        is_orphan = rule_path in orphan_paths
+
+        if key not in irules_data:
+            print(f"  [*] {host}: fetching {rule_path} …", end=" ", flush=True)
+            try:
+                code = get_irule_content(session, host, rule_path)
+            except requests.HTTPError as exc:
+                print(f"FAILED ({exc.response.status_code})")
+                irules_data[key] = {
+                    "host": host, "path": rule_path, "file": None,
+                    "code": f"# fetch failed ({exc.response.status_code})",
+                    "content_hash": None, "duplicate_keys": [],
+                    "ai_analysis": None, "ai_analysis_file": None,
+                    "orphan": is_orphan, "stats": None,
+                    "irule_status": "orphan" if is_orphan else "attached",
+                    "stats_history": [],
+                }
+                continue
+
+            fname = safe_filename(host, rule_path)
+            fpath = irules_dir / fname
+            fpath.write_text(code, encoding="utf-8")
+            print(f"saved → {fpath.name}")
+
             irules_data[key] = {
-                "host": host, "path": rule_path, "file": None,
-                "code": f"# fetch failed ({exc.response.status_code})",
-                "content_hash": None, "duplicate_keys": [],
+                "host": host, "path": rule_path,
+                "file": str(fpath), "code": code,
+                "content_hash": content_hash(code), "duplicate_keys": [],
                 "ai_analysis": None, "ai_analysis_file": None,
+                "orphan": is_orphan, "stats": None,
+                "irule_status": "attached", "stats_history": [],
             }
-            continue
+        else:
+            # Already fetched from another VS; keep orphan=False if any VS uses it
+            irules_data[key]["orphan"] = (is_orphan
+                                          and irules_data[key].get("orphan", False))
 
-        fname = safe_filename(host, rule_path)
-        fpath = irules_dir / fname
-        fpath.write_text(code, encoding="utf-8")
-        print(f"saved → {fpath.name}")
-
-        irules_data[key] = {
-            "host": host, "path": rule_path,
-            "file": str(fpath), "code": code,
-            "content_hash": content_hash(code), "duplicate_keys": [],
-            "ai_analysis": None, "ai_analysis_file": None,
-        }
+        # Fetch execution stats regardless of orphan status
+        irules_data[key]["stats"] = get_irule_stats(session, host, rule_path)
 
     return {"host": host, "error": None, "virtual_servers": vs_list}
 
 
 def ai_enrich_irules(irules_data: dict, irules_dir: Path, ai_cfg: dict,
-                     out_dir: Path | None = None) -> None:
+                     db_conn: sqlite3.Connection) -> None:
     """
     Phase 2 — query the configured AI provider for each downloaded iRule.
-    Skips iRules whose content hash already has a cached analysis for this
-    provider/model combination.  Cache is saved after every new analysis.
-    Rate-limited to ai_cfg['rate_limit'] seconds between requests (XC default).
+    Skips iRules whose content hash is already cached in the DB for this
+    provider/model.  Writes each new successful result to the DB immediately.
     """
     provider = ai_cfg.get("provider", "xc")
     model    = ai_cfg.get("model") or _AI_DEFAULT_MODELS.get(provider)
     label    = f"{provider}" + (f"/{model}" if model else "")
 
-    # Load persisted analysis cache (keyed by content_hash::provider::model)
-    cache_dir     = out_dir or irules_dir.parent
-    ai_cache      = load_ai_cache(cache_dir)
-    cache_entries = ai_cache["entries"]
-
-    keys  = [k for k, v in irules_data.items() if v.get("file")]  # skip failed fetches
+    keys  = [k for k, v in irules_data.items() if v.get("file")]
     total = len(keys)
 
     # Split into cached vs needs-query
-    to_query  = []
+    to_query: list[tuple[str, str | None]] = []
     for key in keys:
-        entry  = irules_data[key]
-        chash  = entry.get("content_hash")
-        ckey   = _ai_cache_key(chash, provider, model) if chash else None
-        if ckey and ckey in cache_entries:
-            # Reuse cached result — no API call needed
-            entry["ai_analysis"] = cache_entries[ckey]
+        entry = irules_data[key]
+        chash = entry.get("content_hash")
+        ckey  = _ai_cache_key(chash, provider, model) if chash else None
+        cached = db_get_ai_result(db_conn, ckey) if ckey else None
+        if cached:
+            entry["ai_analysis"] = {
+                "status":   cached["status"],
+                "analysis": cached["analysis"],
+                "provider": cached["provider"],
+                "model":    cached["model"],
+            }
         else:
             to_query.append((key, ckey))
 
@@ -701,7 +876,8 @@ def ai_enrich_irules(irules_data: dict, irules_dir: Path, ai_cfg: dict,
         lines = code.count("\n") + 1
         max_q = ai_cfg.get("max_query_chars", 8000)
         trunc_note = f", truncating to {max_q}" if chars > max_q else ""
-        print(f"    [AI] querying … ({lines} lines, {chars} chars{trunc_note})", end=" ", flush=True)
+        print(f"    [AI] querying … ({lines} lines, {chars} chars{trunc_note})",
+              end=" ", flush=True)
         ai_result    = analyze_irule(ai_cfg, code)
         last_ai_call = time.time()
         entry["ai_analysis"] = ai_result
@@ -712,12 +888,125 @@ def ai_enrich_irules(irules_data: dict, irules_dir: Path, ai_cfg: dict,
             afpath = irules_dir / afname
             afpath.write_text(ai_result["analysis"], encoding="utf-8")
             entry["ai_analysis_file"] = str(afpath)
-            # Cache successful analyses; save after every result
             if ckey:
-                cache_entries[ckey] = ai_result
-                save_ai_cache(cache_dir, ai_cache)
+                db_save_ai_result(db_conn, ckey, ai_result)
         else:
             print(f"FAILED\n         {ai_result['analysis']}")
+
+
+def collect_irule_stats(host: str, username: str, password: str,
+                        out_dir: Path, partition: str | None = None,
+                        db_conn: sqlite3.Connection | None = None) -> dict:
+    """
+    Standalone stats refresh for a single BIG-IP device.
+
+    Connects to the device, fetches execution stats for every iRule (attached
+    and orphaned), compares the content hash against the last recorded run, and
+    only records a new DB row when the stats have actually changed.
+
+    Can be called independently — does NOT require a full discovery run.
+
+    Returns a summary dict:
+        {
+          "host": str,
+          "checked": int,          # total iRules examined
+          "updated": int,          # iRules whose stats changed
+          "unchanged": int,        # iRules with identical stats to last run
+          "new": int,              # iRules seen for the first time
+          "errors": int,           # iRules with failures or aborts
+        }
+    """
+    import datetime
+
+    close_conn = db_conn is None
+    if db_conn is None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        db_conn = open_db(out_dir)
+        init_db(db_conn)
+
+    session = requests.Session()
+    session.verify = False
+
+    summary = {"host": host, "checked": 0, "updated": 0,
+               "unchanged": 0, "new": 0, "errors": 0}
+    run_at  = datetime.datetime.utcnow().isoformat() + "Z"
+
+    try:
+        token = get_token(session, host, username, password)
+    except Exception as exc:
+        summary["error"] = str(exc)
+        if close_conn:
+            db_conn.close()
+        return summary
+
+    session.headers.update({"X-F5-Auth-Token": token})
+
+    try:
+        all_paths = get_all_irule_paths(session, host, partition)
+    except Exception as exc:
+        summary["error"] = f"Could not list iRules: {exc}"
+        if close_conn:
+            db_conn.close()
+        return summary
+
+    for rule_path in sorted(all_paths):
+        summary["checked"] += 1
+        stats = get_irule_stats(session, host, rule_path)
+
+        # Derive the content hash if the .tcl file exists in the DB history;
+        # otherwise use rule_path as a proxy key for the "last seen" query.
+        # (A full content hash requires fetching the source — we avoid that here.)
+        # Instead, record stats keyed by a path-hash so we can compare delta.
+        path_hash = hashlib.sha256(
+            f"{host}::{rule_path}".encode("utf-8")).hexdigest()
+
+        last = db_conn.execute(
+            "SELECT total_executions, failures, aborts FROM irule_stats "
+            "WHERE content_hash=? ORDER BY run_at DESC LIMIT 1",
+            (path_hash,)).fetchone()
+
+        changed = (last is None or
+                   last["total_executions"] != stats["total_executions"] or
+                   last["failures"]         != stats["failures"] or
+                   last["aborts"]           != stats["aborts"])
+
+        if last is None:
+            summary["new"] += 1
+        elif changed:
+            summary["updated"] += 1
+        else:
+            summary["unchanged"] += 1
+
+        if changed:
+            db_record_stats(db_conn, path_hash, host, rule_path, run_at,
+                            stats["total_executions"], stats["failures"],
+                            stats["aborts"], json.dumps(stats.get("events", {})))
+
+        if stats["failures"] > 0 or stats["aborts"] > 0:
+            summary["errors"] += 1
+
+    if close_conn:
+        db_conn.close()
+    return summary
+
+
+def compute_irule_status(entry: dict) -> str:
+    """
+    Derive a single status string from an iRule manifest entry.
+
+    error    — any failures or aborts recorded
+    orphan   — exists on BIG-IP but not attached to any virtual server
+    active   — attached to a VS and has at least one execution
+    attached — attached to a VS but zero executions yet
+    """
+    stats = entry.get("stats") or {}
+    if stats.get("failures", 0) > 0 or stats.get("aborts", 0) > 0:
+        return "error"
+    if entry.get("orphan", False):
+        return "orphan"
+    if stats.get("total_executions", 0) > 0:
+        return "active"
+    return "attached"
 
 
 def find_duplicate_irules(irules_data: dict) -> int:
@@ -743,6 +1032,7 @@ def find_duplicate_irules(irules_data: dict) -> int:
 # ── HTML generation ───────────────────────────────────────────────────────────
 
 HTML_TEMPLATE = r"""<!DOCTYPE html>
+<!-- v2 -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -765,6 +1055,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .stat-val.accent-blue   { color: #60a5fa; }
   .stat-val.accent-green  { color: #4ade80; }
   .stat-val.accent-amber  { color: #fbbf24; }
+  .stat-val.accent-red    { color: #f87171; }
   .stat-lbl { font-size: 0.62rem; color: #4b5563; text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }
 
   .main-area    { display: flex; flex: 1; overflow: hidden; }
@@ -795,10 +1086,23 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .node.device .icon  { font-size: 14px; fill: #c4b5fd; }
   .node.vs circle     { fill: #1e3a5f; stroke: #3b82f6; }
   .node.vs .icon      { font-size: 11px; fill: #60a5fa; }
-  .node.irule circle  { fill: #1a2e1a; stroke: #22c55e; }
-  .node.irule .icon   { font-size: 10px; fill: #4ade80; }
-  .node.irule.dup circle { stroke: #f59e0b; stroke-dasharray: 4 2; }
-  .node.irule.dup .icon  { fill: #fbbf24; }
+
+  /* iRule — base (status-attached fallback) */
+  .node.irule circle  { fill: #12202e; stroke: #38bdf8; }
+  .node.irule .icon   { font-size: 10px; fill: #7dd3fc; }
+
+  /* Status overrides */
+  .node.irule.status-active   circle { fill: #1a2e1a; stroke: #22c55e; }
+  .node.irule.status-active   .icon  { fill: #4ade80; }
+  .node.irule.status-orphan   circle { fill: #2e2a0a; stroke: #eab308; stroke-dasharray: 4 3; }
+  .node.irule.status-orphan   .icon  { fill: #fbbf24; }
+  .node.irule.status-error    circle { fill: #3d1212; stroke: #ef4444; }
+  .node.irule.status-error    .icon  { fill: #f87171; }
+  .node.irule.status-attached circle { fill: #12202e; stroke: #38bdf8; }
+  .node.irule.status-attached .icon  { fill: #7dd3fc; }
+
+  /* Duplicate — adds dash on top of status color (no fill override) */
+  .node.irule.dup circle { stroke-dasharray: 4 2; }
 
   .node.selected circle { stroke-width: 3.5px; filter: brightness(1.55); }
   .node.dimmed circle   { opacity: 0.25; }
@@ -807,16 +1111,20 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
   .legend { position: absolute; bottom: 16px; left: 16px; background: #1a1d2e; border: 1px solid #2d3148; border-radius: 8px; padding: 10px 14px; font-size: 0.72rem; line-height: 1.9; }
   .legend-row { display: flex; align-items: center; gap: 8px; }
-  .ldot { width: 12px; height: 12px; border-radius: 50%; border: 2px solid; flex-shrink: 0; }
-  .ldot.device { background:#2d1f4e; border-color:#a78bfa; }
-  .ldot.vs     { background:#1e3a5f; border-color:#3b82f6; }
-  .ldot.irule  { background:#1a2e1a; border-color:#22c55e; }
+  .ldot { width: 11px; height: 11px; border-radius: 50%; border: 2px solid; flex-shrink: 0; }
+  .ldot.device           { background:#2d1f4e; border-color:#a78bfa; }
+  .ldot.vs               { background:#1e3a5f; border-color:#3b82f6; }
+  .ldot.irule-active     { background:#1a2e1a; border-color:#22c55e; }
+  .ldot.irule-attached   { background:#12202e; border-color:#38bdf8; }
+  .ldot.irule-orphan     { background:#2e2a0a; border-color:#eab308; border-style: dashed; }
+  .ldot.irule-error      { background:#3d1212; border-color:#ef4444; }
 
   .hint { position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
           font-size: 0.7rem; color: #334155; pointer-events: none; }
-  .tooltip { position: absolute; background: #1e2235; border: 1px solid #3d4266; border-radius: 6px;
-             padding: 6px 10px; font-size: 0.72rem; pointer-events: none; opacity: 0;
-             transition: opacity 0.12s; max-width: 280px; word-break: break-all; z-index: 20; }
+  .tooltip { position: absolute; background: #1a1d2e; border: 1px solid #3d4266; border-radius: 7px;
+             padding: 9px 12px; font-size: 0.72rem; pointer-events: none; opacity: 0;
+             transition: opacity 0.12s; max-width: 230px; word-break: break-word;
+             z-index: 20; line-height: 1.65; }
 
   /* ── Code panel ── */
   #code-panel { width: 44%; min-width: 360px; max-width: 720px; display: flex; flex-direction: column; border-left: 1px solid #2d3148; background: #12151f; }
@@ -933,7 +1241,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <div class="legend">
           <div class="legend-row"><div class="ldot device"></div>BIG-IP Device</div>
           <div class="legend-row"><div class="ldot vs"></div>Virtual Server</div>
-          <div class="legend-row"><div class="ldot irule"></div>iRule</div>
+          <div class="legend-row"><div class="ldot irule-active"></div>iRule — active</div>
+          <div class="legend-row"><div class="ldot irule-attached"></div>iRule — no executions</div>
+          <div class="legend-row"><div class="ldot irule-orphan"></div>iRule — orphaned</div>
+          <div class="legend-row"><div class="ldot irule-error"></div>iRule — errors/aborts</div>
         </div>
         <div class="tooltip" id="tooltip"></div>
       </div>
@@ -961,6 +1272,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <span>Lines: <b id="stat-lines"></b></span>
       <span>Chars: <b id="stat-chars"></b></span>
       <span>Device: <b id="stat-host"></b></span>
+      <span id="stat-exec-wrap" style="display:none">
+        Exec: <b id="stat-exec"></b><span id="stat-errs"></span>
+      </span>
     </div>
     <div id="dup-info"></div>
     <div id="xc-library-info"></div>
@@ -999,6 +1313,44 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <script>
 const DATA = __DATA__;
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function statusColor(s) {
+  return s==='error'?'#ef4444':s==='orphan'?'#eab308':s==='active'?'#4ade80':'#38bdf8';
+}
+
+function sparkline(history, w=160, h=38) {
+  if (!history || history.length === 0) return '';
+  const vals = history.map(h => h.total_executions);
+  const allZero = vals.every(v => v === 0);
+  if (allZero && history.length < 2) return '';
+  const mx   = Math.max(...vals, 1);
+  const hasErr = history.some(h => h.failures > 0 || h.aborts > 0);
+  const lc   = hasErr ? '#f87171' : '#4ade80';
+  const ac   = hasErr ? 'rgba(248,113,113,0.12)' : 'rgba(74,222,128,0.12)';
+
+  if (vals.length === 1) {
+    return `<svg width="${w}" height="${h}" style="display:block;margin-top:5px">
+      <circle cx="${w/2}" cy="${h/2-4}" r="3" fill="${lc}"/>
+      <text x="${w/2+6}" y="${h/2}" font-size="8.5" fill="#64748b">${vals[0].toLocaleString()} exec</text>
+    </svg>`;
+  }
+  const pts  = vals.map((v,i)=>`${(2+(i/(vals.length-1))*(w-4)).toFixed(1)},${(h-8-((v/mx)*(h-16))+4).toFixed(1)}`);
+  const last = pts[pts.length-1].split(',');
+  const area = `2,${h-4} ${pts.join(' ')} ${last[0]},${h-4}`;
+  const d0   = history[0].run_at.slice(0,10);
+  const dN   = history[history.length-1].run_at.slice(0,10);
+  return `<svg width="${w}" height="${h}" style="display:block;margin-top:5px">
+    <polygon points="${area}" fill="${ac}"/>
+    <polyline points="${pts.join(' ')}" fill="none" stroke="${lc}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
+    <text x="1" y="${h-1}" font-size="7.5" fill="#374151">${d0}</text>
+    <text x="${w-1}" y="${h-1}" font-size="7.5" fill="#374151" text-anchor="end">${dN}</text>
+  </svg>`;
+}
+
 // ── Summary bar ─────────────────────────────────────────────────────────────
 const devicesOk   = DATA.devices.filter(d => !d.error).length;
 const totalVS     = DATA.devices.reduce((n, d) => n + d.virtual_servers.length, 0);
@@ -1007,6 +1359,8 @@ const vsWithRules = DATA.devices.reduce((n, d) =>
 const totalRules  = Object.keys(DATA.irules).length;
 const aiAnalysed  = Object.values(DATA.irules).filter(r => r.ai_analysis && r.ai_analysis.status === 'success').length;
 const dupCount    = Object.values(DATA.irules).filter(r => r.duplicate_keys && r.duplicate_keys.length > 0).length;
+const orphanCount = Object.values(DATA.irules).filter(r => r.irule_status === 'orphan').length;
+const errorCount  = Object.values(DATA.irules).filter(r => r.irule_status === 'error').length;
 
 function pill(val, label, accent) {
   return `<div class="stat-pill"><span class="stat-val ${accent}">${val}</span><span class="stat-lbl">${label}</span></div>`;
@@ -1017,13 +1371,33 @@ let summaryHTML =
   pill(vsWithRules,            'VS with iRules',  'accent-green')  +
   pill(totalVS - vsWithRules,  'VS no iRules',    'accent-amber')  +
   pill(totalRules,             'iRules',          'accent-green');
-if (dupCount    > 0) summaryHTML += pill(dupCount,    'Duplicates',   'accent-amber');
-if (aiAnalysed  > 0) summaryHTML += pill(aiAnalysed,  'AI Analysed',  'accent-purple');
+if (errorCount  > 0) summaryHTML += pill(errorCount,  'Errors',      'accent-red'   );
+if (orphanCount > 0) summaryHTML += pill(orphanCount, 'Orphaned',    'accent-amber' );
+if (dupCount    > 0) summaryHTML += pill(dupCount,    'Duplicates',  'accent-amber' );
+if (aiAnalysed  > 0) summaryHTML += pill(aiAnalysed,  'AI Analysed', 'accent-purple');
 document.getElementById('summary').innerHTML = summaryHTML;
 
 // ── Build graph nodes / links ───────────────────────────────────────────────
 const nodes = [], links = [];
 const vsSet = {}, ruleSet = {};
+
+function makeIRuleNode(rk, devHost) {
+  const rd = DATA.irules[rk];
+  return {
+    id: rk, type: 'irule', tier: 2,
+    label:          rd ? rd.path.replace(/^.*\//, '') : rk,
+    full:           rd ? rd.path : rk,
+    host:           rd ? rd.host : devHost,
+    code:           rd ? rd.code : '# source not available',
+    ai_analysis:    rd ? rd.ai_analysis   : null,
+    content_hash:   rd ? rd.content_hash  : null,
+    duplicate_keys: rd ? (rd.duplicate_keys  || []) : [],
+    xc_library:     rd ? (rd.xc_library   || null) : null,
+    irule_status:   rd ? (rd.irule_status || 'attached') : 'attached',
+    stats:          rd ? (rd.stats        || null) : null,
+    stats_history:  rd ? (rd.stats_history || []) : [],
+  };
+}
 
 DATA.devices.forEach(dev => {
   const devId = `dev::${dev.host}`;
@@ -1040,22 +1414,19 @@ DATA.devices.forEach(dev => {
     (vs.rule_keys || []).forEach(rk => {
       if (!ruleSet[rk]) {
         ruleSet[rk] = true;
-        const rd = DATA.irules[rk];
-        nodes.push({
-          id: rk, type: 'irule', tier: 2,
-          label:          rd ? rd.path.replace(/^.*\//, '') : rk,
-          full:           rd ? rd.path : rk,
-          host:           rd ? rd.host : dev.host,
-          code:           rd ? rd.code : '# source not available',
-          ai_analysis:    rd ? rd.ai_analysis : null,
-          content_hash:   rd ? rd.content_hash : null,
-          duplicate_keys: rd ? (rd.duplicate_keys || []) : [],
-          xc_library:     rd ? (rd.xc_library || null) : null,
-        });
+        nodes.push(makeIRuleNode(rk, dev.host));
       }
       links.push({ source: vsId, target: rk, linkType: 'vs-rule' });
     });
   });
+});
+
+// Add orphan iRules (not attached to any VS) as floating nodes
+Object.entries(DATA.irules).forEach(([rk, rd]) => {
+  if (!ruleSet[rk] && rd.irule_status === 'orphan') {
+    ruleSet[rk] = true;
+    nodes.push(makeIRuleNode(rk, rd.host));
+  }
 });
 
 // ── D3 force simulation ─────────────────────────────────────────────────────
@@ -1083,7 +1454,12 @@ const linkSel = g.append('g').selectAll('line')
 
 const nodeSel = g.append('g').selectAll('g')
   .data(nodes).join('g')
-  .attr('class', d => `node ${d.type}${d.duplicate_keys && d.duplicate_keys.length ? ' dup' : ''}`)
+  .attr('class', d => {
+    let cls = `node ${d.type}`;
+    if (d.type === 'irule') cls += ` status-${d.irule_status || 'attached'}`;
+    if (d.duplicate_keys && d.duplicate_keys.length) cls += ' dup';
+    return cls;
+  })
   .call(d3.drag()
     .on('start', (e, d) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
     .on('drag',  (e, d) => { d.fx = e.x; d.fy = e.y; })
@@ -1094,8 +1470,30 @@ const radii = { device: 28, vs: 20, irule: 14 };
 nodeSel.append('circle')
   .attr('r', d => radii[d.type])
   .on('click', (e, d) => { e.stopPropagation(); if (d.type === 'irule') showCode(d); selectNode(d); })
-  .on('mouseover', (e, d) => { tooltip.style.opacity = 1; tooltip.textContent = d.full; })
-  .on('mousemove', e => { tooltip.style.left = (e.offsetX + 14) + 'px'; tooltip.style.top = (e.offsetY - 8) + 'px'; })
+  .on('mouseover', (e, d) => {
+    if (d.type === 'irule') {
+      const sc  = statusColor(d.irule_status || 'attached');
+      const sta = (d.irule_status || 'attached').toUpperCase();
+      let html  = `<div style="color:${sc};font-weight:600;margin-bottom:2px">${escHtml(d.full)}</div>`;
+      html += `<div style="color:#64748b;font-size:0.65rem;margin-bottom:4px">${sta}`;
+      if (d.duplicate_keys && d.duplicate_keys.length) html += ' · duplicate';
+      html += '</div>';
+      const s = d.stats;
+      if (s) {
+        html += `<div style="font-size:0.7rem;color:#94a3b8">`;
+        html += `Exec: <b style="color:#e2e8f0">${s.total_executions.toLocaleString()}</b>`;
+        if (s.failures) html += ` <span style="color:#f87171">· Fail: ${s.failures}</span>`;
+        if (s.aborts)   html += ` <span style="color:#fb923c">· Abort: ${s.aborts}</span>`;
+        html += '</div>';
+      }
+      html += sparkline(d.stats_history);
+      tooltip.innerHTML = html;
+    } else {
+      tooltip.textContent = d.full;
+    }
+    tooltip.style.opacity = 1;
+  })
+  .on('mousemove', e => { tooltip.style.left = (e.offsetX + 16) + 'px'; tooltip.style.top = (e.offsetY - 8) + 'px'; })
   .on('mouseout',  () => { tooltip.style.opacity = 0; });
 
 nodeSel.append('text').attr('class', 'icon').attr('text-anchor', 'middle').attr('dy', '0.35em')
@@ -1216,6 +1614,17 @@ function showCode(d) {
   document.getElementById('stat-lines').textContent = currentCode.split('\n').length;
   document.getElementById('stat-chars').textContent = currentCode.length;
   document.getElementById('stat-host').textContent  = d.host || '';
+  const execWrap = document.getElementById('stat-exec-wrap');
+  const s = d.stats;
+  if (s && (s.total_executions > 0 || s.failures > 0 || s.aborts > 0)) {
+    document.getElementById('stat-exec').textContent = s.total_executions.toLocaleString();
+    const errsEl = document.getElementById('stat-errs');
+    errsEl.innerHTML = (s.failures ? `<span style="color:#f87171"> · Fail: ${s.failures}</span>` : '') +
+                       (s.aborts   ? `<span style="color:#fb923c"> · Abort: ${s.aborts}</span>`  : '');
+    execWrap.style.display = 'inline';
+  } else {
+    execWrap.style.display = 'none';
+  }
 
   // XC Library status bar
   const xcLibEl = document.getElementById('xc-library-info');
@@ -1281,8 +1690,9 @@ function jumpToDup(key) {
   if (!rd) return;
   showCode({ full: rd.path, code: rd.code, host: rd.host,
              ai_analysis: rd.ai_analysis, content_hash: rd.content_hash,
-             duplicate_keys: rd.duplicate_keys || [] });
-  // Highlight the matching node in the force graph if visible
+             duplicate_keys: rd.duplicate_keys || [],
+             irule_status: rd.irule_status, stats: rd.stats,
+             stats_history: rd.stats_history || [] });
   const n = nodes.find(x => x.id === key);
   if (n) selectNode(n);
 }
@@ -1507,6 +1917,16 @@ function buildSankey() {
     });
   });
 
+  // Add orphan iRules connected directly to their device node
+  Object.entries(DATA.irules).forEach(([rk, rd]) => {
+    if (rd.irule_status !== 'orphan') return;
+    const devId = 'dev::' + rd.host;
+    if (!(devId in idx) || rk in idx) return;
+    idx[rk] = ni++;
+    rawNodes.push({ id: rk, name: rd.path.replace(/^.*\//, ''), type: 'irule' });
+    rawLinks.push({ source: idx[devId], target: idx[rk], value: 0.4 });
+  });
+
   const ML = 20, MR = 185, MT = 46, MB = 16;
   const sankey = d3.sankey()
     .nodeAlign(d3.sankeyLeft)
@@ -1520,13 +1940,18 @@ function buildSankey() {
   });
 
   const C = { device: '#a78bfa', vs: '#60a5fa', irule: '#4ade80' };
+  function skNodeColor(d) {
+    if (d.type !== 'irule') return C[d.type];
+    const rd = DATA.irules[d.id];
+    return statusColor((rd && rd.irule_status) || 'attached');
+  }
   const skTip = document.getElementById('sk-tooltip');
 
   // Links
   skG.append('g').attr('fill', 'none')
     .selectAll('path').data(links).join('path')
       .attr('d', d3.sankeyLinkHorizontal())
-      .attr('stroke',         l => C[l.source.type])
+      .attr('stroke',         l => skNodeColor(l.source))
       .attr('stroke-width',   l => Math.max(1.5, l.width))
       .attr('stroke-opacity', 0.18)
       .on('mouseover', function(e, l) {
@@ -1544,23 +1969,40 @@ function buildSankey() {
     .attr('x', d => d.x0).attr('y', d => d.y0)
     .attr('width',  d => d.x1 - d.x0)
     .attr('height', d => Math.max(4, d.y1 - d.y0))
-    .attr('fill', d => C[d.type]).attr('rx', 3).attr('opacity', 0.85)
+    .attr('fill', d => skNodeColor(d)).attr('rx', 3).attr('opacity', 0.85)
     .style('cursor', d => d.type === 'irule' ? 'pointer' : 'default')
     .on('click', (e, d) => {
       if (d.type !== 'irule') return;
       const rd = DATA.irules[d.id];
-      if (rd) showCode({ full: rd.path, code: rd.code, host: rd.host, ai_analysis: rd.ai_analysis });
+      if (rd) showCode({ full: rd.path, code: rd.code, host: rd.host,
+                         ai_analysis: rd.ai_analysis, content_hash: rd.content_hash,
+                         duplicate_keys: rd.duplicate_keys || [],
+                         irule_status: rd.irule_status, stats: rd.stats,
+                         stats_history: rd.stats_history || [] });
     })
     .on('mouseover', function(e, d) {
       d3.select(this).attr('opacity', 1);
       skTip.style.opacity = 1;
       const inn = links.filter(l => l.target === d).length;
       const out = links.filter(l => l.source === d).length;
-      skTip.innerHTML = '<b>' + d.name + '</b>'
-        + (d.type === 'irule' ? ' <span style="color:#4ade80;font-size:0.65rem">click to view</span>' : '')
-        + '<br><span style="color:#64748b;font-size:0.68rem">' + d.type.toUpperCase() + '</span>'
-        + (inn ? '<br>\u2190 ' + inn + (inn > 1 ? ' connections in'  : ' connection in')  : '')
-        + (out ? '<br>\u2192 ' + out + (out > 1 ? ' connections out' : ' connection out') : '');
+      const rd  = d.type === 'irule' ? DATA.irules[d.id] : null;
+      const st  = rd ? (rd.irule_status || 'attached') : null;
+      const sc  = st ? statusColor(st) : C[d.type];
+      let html  = `<b style="color:${sc}">${d.name}</b>`;
+      if (d.type === 'irule') html += ' <span style="color:#4ade80;font-size:0.65rem">click to view</span>';
+      html += `<br><span style="color:#64748b;font-size:0.68rem">${d.type.toUpperCase()}`;
+      if (st) html += ` \u00b7 ${st}`;
+      html += '</span>';
+      if (rd && rd.stats) {
+        const s = rd.stats;
+        html += `<br><span style="font-size:0.7rem;color:#94a3b8">Exec: <b>${s.total_executions.toLocaleString()}</b>`;
+        if (s.failures) html += ` <span style="color:#f87171">\u00b7 Fail: ${s.failures}</span>`;
+        if (s.aborts)   html += ` <span style="color:#fb923c">\u00b7 Abort: ${s.aborts}</span>`;
+        html += '</span>';
+      }
+      if (inn) html += `<br><span style="color:#475569;font-size:0.68rem">\u2190 ${inn} in</span>`;
+      if (out) html += `<br><span style="color:#475569;font-size:0.68rem">\u2192 ${out} out</span>`;
+      skTip.innerHTML = html;
     })
     .on('mousemove', e => { skTip.style.left=(e.clientX+14)+'px'; skTip.style.top=(e.clientY-10)+'px'; })
     .on('mouseout', function() { d3.select(this).attr('opacity', 0.85); skTip.style.opacity=0; });
@@ -1633,6 +2075,10 @@ def main() -> None:
                         help="Re-generate irule_viewer.html from an existing manifest.json "
                              "(no BIG-IP connection required). Combine with --output-dir if "
                              "your output is not in the default location.")
+    parser.add_argument("--stats-only", action="store_true",
+                        help="Refresh execution stats from BIG-IP without a full re-discovery. "
+                             "Only records rows whose stats changed since the last run. "
+                             "Requires --host/--hosts-file, --username, --password.")
 
     src = parser.add_mutually_exclusive_group()
     src.add_argument("--host",       metavar="HOST",
@@ -1691,8 +2137,14 @@ def main() -> None:
                      "Run a discovery first or use --output-dir to point at the right folder.")
         print(f"[*] Loading manifest → {manifest_path}")
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        # Back-fill hashes and duplicate detection if manifest pre-dates this feature
-        irules = manifest.get("irules", {})
+        irules   = manifest.get("irules", {})
+
+        # Open DB (creates it if this is first run after migration)
+        conn = open_db(out_dir)
+        init_db(conn)
+        _migrate_json_to_db(conn, out_dir)
+
+        # Back-fill hashes / dedup for old manifests
         needs_hash = any(v.get("content_hash") is None and v.get("code") for v in irules.values())
         if needs_hash:
             for entry in irules.values():
@@ -1703,24 +2155,73 @@ def main() -> None:
             dups = find_duplicate_irules(irules)
             if dups:
                 print(f"[~] Back-filled hashes · {dups} duplicate(s) detected")
-        # Back-fill xc_library from local upload registry (no credentials needed)
-        registry = load_upload_registry(out_dir)
-        reg_entries = registry.get("entries", {})
+
+        # Back-fill xc_library from DB
+        xc_entries = db_load_upload_registry(conn)
         lib_filled = 0
         for entry in irules.values():
-            chash = entry.get("content_hash")
-            new_val = reg_entries.get(chash) if chash else None
+            chash   = entry.get("content_hash")
+            new_val = xc_entries.get(chash) if chash else None
             if entry.get("xc_library") != new_val:
                 entry["xc_library"] = new_val
                 lib_filled += 1
+        if lib_filled:
+            print(f"[~] Back-filled xc_library on {lib_filled} iRule(s) from DB")
+
+        # Back-fill stats_history and irule_status from DB
+        for entry in irules.values():
+            chash = entry.get("content_hash")
+            if chash:
+                entry["stats_history"] = db_get_stats_history(conn, chash)
+            if not entry.get("irule_status"):
+                entry["irule_status"] = compute_irule_status(entry)
+
         if lib_filled or needs_hash:
             manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
-        if lib_filled:
-            print(f"[~] Back-filled xc_library on {lib_filled} iRule(s) from registry")
+
         html_path = out_dir / "irule_viewer.html"
         html_path.write_text(build_html(manifest), encoding="utf-8")
         print(f"[+] HTML viewer rebuilt → {html_path}")
+        conn.close()
         webbrowser.open(html_path.resolve().as_uri())
+        return
+
+    # ── --stats-only: refresh execution stats without full re-discovery ────────
+    if args.stats_only:
+        if not args.host and not args.hosts_file:
+            parser.error("--stats-only requires --host or --hosts-file")
+        if not args.username:
+            parser.error("--stats-only requires --username / -u")
+        if not args.password:
+            parser.error("--stats-only requires --password / -p")
+        out_dir = Path(args.output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        conn = open_db(out_dir)
+        init_db(conn)
+        _migrate_json_to_db(conn, out_dir)
+        hosts = ([args.host] if args.host else load_hosts_file(args.hosts_file))
+        print(f"\n{'─'*55}")
+        print(f"  Stats refresh — {len(hosts)} device(s)")
+        print(f"{'─'*55}")
+        total_updated = 0
+        for host in hosts:
+            print(f"\n[*] {host} …", flush=True)
+            result = collect_irule_stats(host, args.username, args.password,
+                                         out_dir, partition=args.partition,
+                                         db_conn=conn)
+            if "error" in result:
+                print(f"[!] {host}: {result['error']}")
+            else:
+                print(f"[+] {host}: {result['checked']} checked · "
+                      f"{result['new']} new · {result['updated']} updated · "
+                      f"{result['unchanged']} unchanged · {result['errors']} with errors")
+                total_updated += result["updated"] + result["new"]
+        conn.close()
+        if total_updated:
+            print(f"\n[~] {total_updated} stat change(s) recorded — "
+                  "run --rebuild-html to refresh the viewer")
+        else:
+            print("\n[✓] All stats unchanged since last run")
         return
 
     # Normal discovery mode — --host/--hosts-file and credentials are required
@@ -1791,10 +2292,15 @@ def main() -> None:
     irules_dir = out_dir / "irules"
     irules_dir.mkdir(parents=True, exist_ok=True)
 
+    # ── Open SQLite DB (create + migrate on first run) ───────────────────────
+    conn = open_db(out_dir)
+    init_db(conn)
+    _migrate_json_to_db(conn, out_dir)
+
     irules_data: dict[str, dict] = {}
     device_records: list[dict]   = []
 
-    # ── Phase 1: download iRules from all BIG-IP devices (no rate limiting) ──
+    # ── Phase 1: download iRules + stats from all BIG-IP devices ────────────
     print(f"\n{'─'*55}")
     print(f"  Phase 1 — BIG-IP discovery ({len(hosts)} device(s))")
     print(f"{'─'*55}")
@@ -1808,6 +2314,26 @@ def main() -> None:
     if dup_count:
         print(f"\n[~] Duplicates: {dup_count} iRule(s) share content with at least one other rule")
 
+    # ── Record stats to DB and compute final status ──────────────────────────
+    import datetime
+    run_at = datetime.datetime.utcnow().isoformat() + "Z"
+    for entry in irules_data.values():
+        chash = entry.get("content_hash")
+        stats = entry.get("stats")
+        if chash and stats:
+            db_record_stats(conn, chash, entry["host"], entry["path"], run_at,
+                            stats["total_executions"], stats["failures"], stats["aborts"],
+                            json.dumps(stats.get("events", {})))
+            entry["stats_history"] = db_get_stats_history(conn, chash)
+        entry["irule_status"] = compute_irule_status(entry)
+
+    # ── Back-fill xc_library from DB (even without --upload) ────────────────
+    xc_entries = db_load_upload_registry(conn)
+    for entry in irules_data.values():
+        chash = entry.get("content_hash")
+        if chash and not entry.get("xc_library"):
+            entry["xc_library"] = xc_entries.get(chash)
+
     # ── Phase 2: AI analysis (rate-limited for XC) ──────────────────────────
     if ai_cfg:
         provider = ai_cfg.get("provider", "xc")
@@ -1818,7 +2344,7 @@ def main() -> None:
         print(f"\n{'─'*55}")
         print(f"  Phase 2 — AI analysis via {label}{rl_note}")
         print(f"{'─'*55}")
-        ai_enrich_irules(irules_data, irules_dir, ai_cfg, out_dir=out_dir)
+        ai_enrich_irules(irules_data, irules_dir, ai_cfg, db_conn=conn)
 
     # ── Phase 3: XC iRule library upload ────────────────────────────────────
     if xc_cfg and args.upload:
@@ -1827,12 +2353,15 @@ def main() -> None:
         print(f"\n{'─'*55}")
         print(f"  Phase 3 — XC iRule library upload  (namespace={upload_ns})")
         print(f"{'─'*55}")
-        xc_upload_irules(irules_data, out_dir, xc_cfg)
+        xc_upload_irules(irules_data, out_dir, xc_cfg, db_conn=conn)
+
+    conn.close()
 
     manifest = {"devices": device_records, "irules": irules_data}
     manifest_path = out_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
     print(f"\n[+] Manifest written → {manifest_path}")
+    print(f"[+] Database → {out_dir / _DB_FILE}")
 
     if not args.no_html:
         html_path = out_dir / "irule_viewer.html"
@@ -1843,12 +2372,15 @@ def main() -> None:
     total_vs    = sum(len(d["virtual_servers"]) for d in device_records)
     total_rules = len(irules_data)
     ok_devs     = sum(1 for d in device_records if not d.get("error"))
+    orphans     = sum(1 for r in irules_data.values() if r.get("irule_status") == "orphan")
+    errors      = sum(1 for r in irules_data.values() if r.get("irule_status") == "error")
     ai_ok       = sum(1 for r in irules_data.values()
                       if r.get("ai_analysis") and r["ai_analysis"]["status"] == "success")
 
     print(f"\n[✓] Done — {ok_devs}/{len(hosts)} device(s) · {total_vs} VS · {total_rules} iRules", end="")
-    if ai_cfg:
-        print(f" · {ai_ok}/{total_rules} AI analyses", end="")
+    if orphans: print(f" · {orphans} orphaned", end="")
+    if errors:  print(f" · {errors} with errors", end="")
+    if ai_cfg:  print(f" · {ai_ok}/{total_rules} AI analyses", end="")
     print()
 
 
