@@ -776,7 +776,13 @@ def discover_device(host: str, username: str, password: str,
     if include_orphans:
         try:
             device_paths = get_all_irule_paths(session, host, partition)
-            orphan_paths = set(device_paths) - all_rule_paths
+            # Strip BIG-IP built-in system iRules (_sys_* prefix on the name
+            # component, e.g. /Common/_sys_https_redirect).  These are shipped
+            # by F5 and are never user-defined; including them inflates the count
+            # with hundreds of rules the user has no interest in analysing.
+            user_paths = {p for p in device_paths
+                          if not p.rsplit("/", 1)[-1].startswith("_sys_")}
+            orphan_paths = user_paths - all_rule_paths
             if orphan_paths:
                 print(f"[+] {host}: {len(orphan_paths)} orphan iRule(s) not attached to any VS")
         except Exception as exc:
