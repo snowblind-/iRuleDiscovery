@@ -1086,7 +1086,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
   .main-area    { display: flex; flex: 1; overflow: hidden; }
   .diagram-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
-  #pane-force   { flex: 1; display: flex; overflow: hidden; }
+  #pane-force   { flex: 1; display: none; overflow: hidden; }
 
   /* ── Resize handles ── */
   .resize-v { width: 5px; flex-shrink: 0; cursor: col-resize; background: #2d3148; position: relative; z-index: 5; transition: background 0.15s; }
@@ -1299,9 +1299,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 </header>
 
 <div class="tab-bar">
-  <button class="tab-btn active" id="tab-force"  onclick="switchTab('force')">&#11042; Force Graph</button>
+  <button class="tab-btn active" id="tab-fleet"  onclick="switchTab('fleet')">&#9783; Device Fleet</button>
+  <button class="tab-btn"        id="tab-force"  onclick="switchTab('force')">&#11042; Force Graph</button>
   <button class="tab-btn"        id="tab-sankey" onclick="switchTab('sankey')">&#8644; Sankey Flow</button>
-  <button class="tab-btn"        id="tab-fleet"  onclick="switchTab('fleet')">&#9783; Device Fleet</button>
 </div>
 
 <div class="main-area">
@@ -2046,7 +2046,7 @@ function makeVResize(handle, pane, container) {
 
 // ── Tab switching ────────────────────────────────────────────────────────────
 function switchTab(name) {
-  document.getElementById('pane-force').style.display = name === 'force' ? 'flex' : 'none';
+  document.getElementById('pane-force').style.display  = name === 'force'  ? 'flex' : 'none';
   document.getElementById('pane-sankey').classList.toggle('active', name === 'sankey');
   document.getElementById('pane-fleet').classList.toggle('active',  name === 'fleet');
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
@@ -2054,6 +2054,8 @@ function switchTab(name) {
   if (name === 'sankey' && !sankeyBuilt) buildSankey();
   if (name === 'fleet'  && !fleetBuilt)  buildFleet();
 }
+// Open Fleet by default
+switchTab('fleet');
 
 // ── Fleet view ───────────────────────────────────────────────────────────────
 let fleetBuilt = false;
