@@ -716,7 +716,8 @@ def load_hosts_file(path: str) -> list[str]:
 def discover_device(host: str, username: str, password: str,
                     partition: str | None,
                     irules_dir: Path,
-                    irules_data: dict) -> dict:
+                    irules_data: dict,
+                    include_orphans: bool = False) -> dict:
     """
     Phase 1 — connect to one BIG-IP, collect VS→iRule inventory, save .tcl files.
     No rate limiting; downloads run as fast as the device allows.
@@ -770,17 +771,18 @@ def discover_device(host: str, username: str, password: str,
 
     print(f"[+] {host}: {len(all_rule_paths)} unique iRule(s) attached to VS")
 
-    # ── Orphan detection: all iRules on device vs VS-attached ───────────────
-    try:
-        device_paths = get_all_irule_paths(session, host, partition)
-        orphan_paths = set(device_paths) - all_rule_paths
-        if orphan_paths:
-            print(f"[+] {host}: {len(orphan_paths)} orphan iRule(s) not attached to any VS")
-    except Exception as exc:
-        logging.getLogger(__name__).debug("Orphan detection failed for %s: %s", host, exc)
-        orphan_paths = set()
+    # ── Orphan detection (opt-in via --include-orphans) ─────────────────────
+    orphan_paths: set[str] = set()
+    if include_orphans:
+        try:
+            device_paths = get_all_irule_paths(session, host, partition)
+            orphan_paths = set(device_paths) - all_rule_paths
+            if orphan_paths:
+                print(f"[+] {host}: {len(orphan_paths)} orphan iRule(s) not attached to any VS")
+        except Exception as exc:
+            logging.getLogger(__name__).debug("Orphan detection failed for %s: %s", host, exc)
 
-    # ── Fetch code + stats for attached and orphan iRules ───────────────────
+    # ── Fetch code + stats for VS-attached rules (+ orphans if opted in) ────
     for rule_path in sorted(all_rule_paths | orphan_paths):
         key       = irule_key(host, rule_path)
         is_orphan = rule_path in orphan_paths
@@ -2103,6 +2105,10 @@ def main() -> None:
                         help="Limit to a specific partition, e.g. Common")
     parser.add_argument("--no-html",   action="store_true",
                         help="Skip HTML viewer generation")
+    parser.add_argument("--include-orphans", action="store_true",
+                        help="Also discover iRules that exist on BIG-IP but are not "
+                             "attached to any virtual server (default: off — BIG-IP "
+                             "ships with hundreds of system iRules that inflate the count)")
 
     xc = parser.add_argument_group("F5 Distributed Cloud (optional — matches irule-ai-assistant flags)")
     xc.add_argument("-t", "--tenant",       metavar="TENANT",
@@ -2315,7 +2321,8 @@ def main() -> None:
     print(f"{'─'*55}")
     for host in hosts:
         rec = discover_device(host, args.username, args.password,
-                              args.partition, irules_dir, irules_data)
+                              args.partition, irules_dir, irules_data,
+                              include_orphans=args.include_orphans)
         device_records.append(rec)
 
     # ── Deduplication: hash all iRules, find identical content ───────────────
