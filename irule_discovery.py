@@ -1214,18 +1214,25 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .ai-label.fail { color: #f87171; }
   .ai-label.none { color: #4b5563; }
   #ai-text { font-family: 'Segoe UI', system-ui, sans-serif; font-size: 0.78rem; line-height: 1.75; color: #94a3b8; }
-  #ai-text p  { margin: 4px 0 8px; }
-  #ai-text ol, #ai-text ul { padding-left: 20px; margin: 4px 0 8px; }
-  #ai-text li { margin: 3px 0; }
-  #ai-text strong, #ai-text b { color: #c4b5fd; }
-  #ai-text em, #ai-text i  { color: #93c5fd; font-style: italic; }
-  #ai-text code { background: #1a2e1a; padding: 1px 5px; border-radius: 3px; font-family: 'JetBrains Mono',Consolas,monospace; font-size: 0.72rem; color: #4ade80; }
-  #ai-text pre  { background: #1a2e1a; border: 1px solid #2d4a2d; border-radius: 5px; padding: 8px 10px; overflow-x: auto; margin: 6px 0; }
-  #ai-text pre code { background: none; padding: 0; }
-  #ai-text h1,#ai-text h2,#ai-text h3,#ai-text h4 { color: #a78bfa; margin: 10px 0 4px; font-size: 0.85rem; font-weight: 700; }
-  #ai-text a  { color: #60a5fa; text-decoration: none; }
-  #ai-text a:hover { text-decoration: underline; }
-  #ai-text hr { border: none; border-top: 1px solid #2d3148; margin: 8px 0; }
+  #ai-text p, .ai-body p  { margin: 4px 0 8px; }
+  #ai-text ol, #ai-text ul,
+  .ai-body  ol, .ai-body  ul { padding-left: 20px; margin: 4px 0 8px; }
+  #ai-text li, .ai-body li  { margin: 3px 0; }
+  #ai-text strong, #ai-text b,
+  .ai-body  strong, .ai-body b { color: #c4b5fd; }
+  #ai-text em, #ai-text i,
+  .ai-body  em, .ai-body  i  { color: #93c5fd; font-style: italic; }
+  #ai-text code, .ai-body code { background: #1a2e1a; padding: 1px 5px; border-radius: 3px; font-family: 'JetBrains Mono',Consolas,monospace; font-size: 0.72rem; color: #4ade80; }
+  #ai-text pre, .ai-body pre  { background: #1a2e1a; border: 1px solid #2d4a2d; border-radius: 5px; padding: 8px 10px; overflow-x: auto; margin: 6px 0; }
+  #ai-text pre code, .ai-body pre code { background: none; padding: 0; color: #86efac; }
+  #ai-text h1,#ai-text h2,#ai-text h3,#ai-text h4,#ai-text h5,#ai-text h6,
+  .ai-body  h1,.ai-body  h2,.ai-body  h3,.ai-body  h4,.ai-body  h5,.ai-body  h6 { color: #a78bfa; margin: 12px 0 4px; font-weight: 700; }
+  #ai-text h4, .ai-body h4 { font-size: 0.85rem; }
+  #ai-text h5, .ai-body h5 { font-size: 0.80rem; color: #c4b5fd; }
+  #ai-text h6, .ai-body h6 { font-size: 0.76rem; color: #c4b5fd; }
+  #ai-text a, .ai-body a   { color: #60a5fa; text-decoration: none; }
+  #ai-text a:hover, .ai-body a:hover { text-decoration: underline; }
+  #ai-text hr, .ai-body hr { border: none; border-top: 1px solid #2d3148; margin: 10px 0; }
 
   /* ── Tab bar ── */
   .tab-bar { display: flex; background: #161926; border-bottom: 1px solid #2d3148; padding: 0 16px; flex-shrink: 0; gap: 2px; }
@@ -1602,25 +1609,105 @@ function decodeBigIP(s) {
 }
 
 // ── AI text renderer ────────────────────────────────────────────────────────
-// Renders HTML from XC AI directly; converts plain markdown as a fallback.
+// Converts Markdown (as returned by Claude / OpenAI) to readable HTML.
+// Handles: headings, bold, italic, inline code, fenced code blocks,
+//          bullet lists (nested via indent), horizontal rules, paragraphs.
 function renderAI(text) {
   if (!text) return '';
   // Strip any script tags before inserting as innerHTML
   text = text.replace(/<script[\s\S]*?<\/script>/gi, '');
-  // If it already contains HTML tags, render directly
+  // If the response is already HTML, render it directly
   if (/<[a-zA-Z][\s\S]*?>/.test(text)) return text;
-  // Simple markdown → HTML for non-HTML responses (demo data etc.)
-  let h = text
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-    .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g,'<em>$1</em>')
-    .replace(/`([^`\n]+)`/g,'<code>$1</code>')
-    .replace(/^#{1,4}\s+(.+)$/gm,'<h4>$1</h4>')
-    .replace(/^[-•]\s+(.+)$/gm,'<li>$1</li>')
-    .replace(/(<li>[\s\S]+?<\/li>)/g,'<ul>$1</ul>')
-    .replace(/\n\n+/g,'</p><p>')
-    .replace(/\n/g,'<br>');
-  return '<p>' + h + '</p>';
+
+  // ── pass 1: extract fenced code blocks to avoid mangling their contents ──
+  const blocks = [];
+  text = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+    const idx = blocks.length;
+    const escaped = code.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const cls = lang ? ` class="language-${lang}"` : '';
+    blocks.push(`<pre><code${cls}>${escaped}</code></pre>`);
+    return `\x00BLOCK${idx}\x00`;
+  });
+
+  // ── pass 2: escape remaining HTML ──
+  text = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+  // ── pass 3: line-by-line processing ──
+  const lines = text.split('\n');
+  const out   = [];
+  let   inUL  = false;   // inside a <ul>
+
+  const flushList = () => { if (inUL) { out.push('</ul>'); inUL = false; } };
+
+  const inlineFormat = s =>
+    s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+     .replace(/\*(.+?)\*/g,     '<em>$1</em>')
+     .replace(/`([^`]+)`/g,     '<code>$1</code>');
+
+  for (let i = 0; i < lines.length; i++) {
+    const raw  = lines[i];
+    const line = raw.trimEnd();
+
+    // fenced code block placeholder
+    if (/^\x00BLOCK\d+\x00$/.test(line.trim())) {
+      flushList();
+      out.push(line.trim());
+      continue;
+    }
+
+    // horizontal rule
+    if (/^---+$/.test(line.trim())) {
+      flushList();
+      out.push('<hr>');
+      continue;
+    }
+
+    // headings  ## 1. Objective  /  ### Sub  etc.
+    const hm = line.match(/^(#{1,6})\s+(.*)/);
+    if (hm) {
+      flushList();
+      const lvl  = Math.min(hm[1].length + 2, 6);   // ## → h4, ### → h5, etc.
+      out.push(`<h${lvl}>${inlineFormat(hm[2])}</h${lvl}>`);
+      continue;
+    }
+
+    // bullet list item  (- or • or *)
+    const lm = line.match(/^(\s*)[-•*]\s+(.*)/);
+    if (lm) {
+      if (!inUL) { out.push('<ul>'); inUL = true; }
+      out.push(`<li>${inlineFormat(lm[2])}</li>`);
+      continue;
+    }
+
+    // numbered list item
+    const nm = line.match(/^(\s*)\d+[.)]\s+(.*)/);
+    if (nm) {
+      if (!inUL) { out.push('<ul>'); inUL = true; }
+      out.push(`<li>${inlineFormat(nm[2])}</li>`);
+      continue;
+    }
+
+    // blank line → paragraph break
+    if (line.trim() === '') {
+      flushList();
+      out.push('<p>');
+      continue;
+    }
+
+    // plain paragraph text
+    flushList();
+    out.push(inlineFormat(line) + ' ');
+  }
+  flushList();
+
+  // ── pass 4: restore fenced code blocks ──
+  let html = out.join('\n');
+  blocks.forEach((b, idx) => { html = html.replace(`\x00BLOCK${idx}\x00`, b); });
+
+  // collapse runs of empty <p> tags
+  html = html.replace(/(<p>\s*){2,}/g, '<p>');
+
+  return `<div class="ai-body">${html}</div>`;
 }
 
 // ── Code viewer ─────────────────────────────────────────────────────────────
