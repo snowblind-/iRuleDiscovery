@@ -1234,6 +1234,44 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   #ai-text a:hover, .ai-body a:hover { text-decoration: underline; }
   #ai-text hr, .ai-body hr { border: none; border-top: 1px solid #2d3148; margin: 10px 0; }
 
+  /* ── Fleet view ── */
+  #pane-fleet { flex: 1; display: none; flex-direction: column; overflow: hidden; background: #080c12; }
+  #pane-fleet.active { display: flex; }
+  #fleet-toolbar { display: flex; align-items: center; gap: 10px; padding: 8px 14px; background: #0d1117; border-bottom: 1px solid #1e2638; flex-shrink: 0; flex-wrap: wrap; }
+  #fleet-search { background: #161926; border: 1px solid #2d3148; border-radius: 6px; color: #94a3b8; font-size: 0.78rem; padding: 5px 10px; width: 210px; outline: none; }
+  #fleet-search:focus { border-color: #a78bfa; }
+  #fleet-status-filters, #fleet-sort-btns { display: flex; gap: 4px; align-items: center; }
+  .fleet-sort-label { font-size: 0.68rem; color: #4b5563; text-transform: uppercase; letter-spacing: 0.05em; }
+  .flt-btn, .fsort-btn { background: #161926; border: 1px solid #2d3148; border-radius: 5px; color: #4b5563; font-size: 0.72rem; font-weight: 600; padding: 4px 10px; cursor: pointer; letter-spacing: 0.03em; transition: color 0.12s, border-color 0.12s, background 0.12s; }
+  .flt-btn:hover, .fsort-btn:hover { color: #94a3b8; border-color: #4b5563; }
+  .flt-btn.active, .fsort-btn.active { color: #c4b5fd; border-color: #a78bfa; background: #1a1430; }
+  .flt-btn.error  { color: #f87171; border-color: #7f1d1d; }
+  .flt-btn.error.active  { background: #2a0808; border-color: #ef4444; }
+  .flt-btn.orphan { color: #fbbf24; border-color: #78350f; }
+  .flt-btn.orphan.active { background: #1e1505; border-color: #eab308; }
+  .flt-btn.active2 { color: #4ade80; border-color: #14532d; }
+  .flt-btn.active2.active { background: #071a0e; border-color: #22c55e; }
+  .flt-btn.attch  { color: #38bdf8; border-color: #0c4a6e; }
+  .flt-btn.attch.active  { background: #051218; border-color: #38bdf8; }
+  #fleet-counts { margin-left: auto; font-size: 0.70rem; color: #4b5563; white-space: nowrap; }
+  #fleet-grid { flex: 1; overflow-y: auto; padding: 12px 14px; display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 6px; align-content: start; }
+  .fleet-tile { background: #0d1117; border: 1px solid #1e2638; border-left: 4px solid #2d3148; border-radius: 6px; padding: 8px 10px; cursor: pointer; transition: filter 0.12s, border-color 0.12s; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .fleet-tile:hover { filter: brightness(1.35); border-color: #4b5563; }
+  .fleet-tile.st-error    { border-left-color: #ef4444; background: #100808; }
+  .fleet-tile.st-orphan   { border-left-color: #eab308; background: #0e0c04; }
+  .fleet-tile.st-active   { border-left-color: #22c55e; background: #071008; }
+  .fleet-tile.st-attached { border-left-color: #38bdf8; background: #050e14; }
+  .fleet-tile.st-unreachable { border-left-color: #6b7280; background: #0d0d0d; }
+  .ft-host { font-family: 'JetBrains Mono', Consolas, monospace; font-size: 0.70rem; color: #c4b5fd; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+  .ft-meta { font-size: 0.65rem; color: #4b5563; white-space: nowrap; }
+  .ft-dots { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; margin-top: 1px; }
+  .ft-dot  { display: inline-flex; align-items: center; gap: 2px; font-size: 0.62rem; font-weight: 700; border-radius: 3px; padding: 1px 5px; }
+  .ft-dot.err  { background: rgba(239,68,68,0.18);  color: #fca5a5; }
+  .ft-dot.orp  { background: rgba(234,179,8,0.18);  color: #fde68a; }
+  .ft-dot.act  { background: rgba(34,197,94,0.18);  color: #86efac; }
+  .ft-dot.att  { background: rgba(56,189,248,0.18); color: #7dd3fc; }
+  .fleet-empty { grid-column: 1/-1; text-align: center; color: #4b5563; font-size: 0.85rem; padding: 60px 0; }
+
   /* ── Tab bar ── */
   .tab-bar { display: flex; background: #161926; border-bottom: 1px solid #2d3148; padding: 0 16px; flex-shrink: 0; gap: 2px; }
   .tab-btn { background: none; border: none; border-bottom: 2px solid transparent; color: #4b5563; font-size: 0.78rem; font-weight: 600; padding: 8px 18px; cursor: pointer; letter-spacing: 0.03em; transition: color 0.15s; margin-bottom: -1px; white-space: nowrap; }
@@ -1263,6 +1301,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <div class="tab-bar">
   <button class="tab-btn active" id="tab-force"  onclick="switchTab('force')">&#11042; Force Graph</button>
   <button class="tab-btn"        id="tab-sankey" onclick="switchTab('sankey')">&#8644; Sankey Flow</button>
+  <button class="tab-btn"        id="tab-fleet"  onclick="switchTab('fleet')">&#9783; Device Fleet</button>
 </div>
 
 <div class="main-area">
@@ -1286,6 +1325,27 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div id="pane-sankey">
       <svg id="sankey-svg"></svg>
       <div class="sk-tooltip" id="sk-tooltip"></div>
+    </div>
+
+    <div id="pane-fleet">
+      <div id="fleet-toolbar">
+        <input id="fleet-search" type="search" placeholder="&#128269; Filter devices…" autocomplete="off">
+        <div id="fleet-status-filters">
+          <button class="flt-btn active" data-s="all">All</button>
+          <button class="flt-btn error"   data-s="error">Error</button>
+          <button class="flt-btn orphan"  data-s="orphan">Orphan</button>
+          <button class="flt-btn active2" data-s="active">Active</button>
+          <button class="flt-btn attch"   data-s="attached">Attached</button>
+        </div>
+        <div id="fleet-sort-btns">
+          <span class="fleet-sort-label">Sort:</span>
+          <button class="fsort-btn active" data-sort="status">Severity</button>
+          <button class="fsort-btn" data-sort="name">Name</button>
+          <button class="fsort-btn" data-sort="rules">Rules ↓</button>
+        </div>
+        <div id="fleet-counts"></div>
+      </div>
+      <div id="fleet-grid"></div>
     </div>
   </div>
 
@@ -1472,7 +1532,8 @@ let W = panel.clientWidth, H = panel.clientHeight;
 
 const svg = d3.select('#svg');
 const g   = svg.append('g');
-svg.call(d3.zoom().scaleExtent([0.1, 5]).on('zoom', e => g.attr('transform', e.transform)));
+const zoomBehavior = d3.zoom().scaleExtent([0.1, 5]).on('zoom', e => g.attr('transform', e.transform));
+svg.call(zoomBehavior);
 
 const sim = d3.forceSimulation(nodes)
   .force('link', d3.forceLink(links).id(d => d.id)
@@ -1987,9 +2048,150 @@ function makeVResize(handle, pane, container) {
 function switchTab(name) {
   document.getElementById('pane-force').style.display = name === 'force' ? 'flex' : 'none';
   document.getElementById('pane-sankey').classList.toggle('active', name === 'sankey');
+  document.getElementById('pane-fleet').classList.toggle('active',  name === 'fleet');
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.getElementById('tab-' + name).classList.add('active');
   if (name === 'sankey' && !sankeyBuilt) buildSankey();
+  if (name === 'fleet'  && !fleetBuilt)  buildFleet();
+}
+
+// ── Fleet view ───────────────────────────────────────────────────────────────
+let fleetBuilt = false;
+
+// Roll-up priority: error > orphan > active > attached > unreachable
+const STATUS_RANK = { error: 4, orphan: 3, active: 2, attached: 1, unreachable: 0 };
+
+function buildFleetData() {
+  return DATA.devices.map(dev => {
+    if (dev.error) {
+      return { host: dev.host, rolledStatus: 'unreachable', vsCount: 0,
+               ruleCount: 0, sc: { error:0, orphan:0, active:0, attached:0 }, err: dev.error };
+    }
+    const ruleKeys = new Set();
+    (dev.virtual_servers || []).forEach(vs =>
+      (vs.rule_keys || []).forEach(rk => ruleKeys.add(rk)));
+    // include orphans that belong to this device
+    Object.entries(DATA.irules).forEach(([rk, rd]) => {
+      if (rd.host === dev.host && rd.irule_status === 'orphan') ruleKeys.add(rk);
+    });
+    const sc = { error: 0, orphan: 0, active: 0, attached: 0 };
+    ruleKeys.forEach(rk => {
+      const st = (DATA.irules[rk] || {}).irule_status || 'attached';
+      if (st in sc) sc[st]++;
+    });
+    let rolledStatus = 'attached';
+    if (sc.active  > 0) rolledStatus = 'active';
+    if (sc.orphan  > 0) rolledStatus = 'orphan';
+    if (sc.error   > 0) rolledStatus = 'error';
+    return { host: dev.host, rolledStatus,
+             vsCount: (dev.virtual_servers || []).length,
+             ruleCount: ruleKeys.size, sc };
+  });
+}
+
+function focusDevice(host) {
+  switchTab('force');
+  requestAnimationFrame(() => {
+    const n = nodes.find(d => d.type === 'device' && d.label === host);
+    if (!n || n.x == null) return;
+    const scale = 1.8;
+    const tx = W / 2 - n.x * scale;
+    const ty = H / 2 - n.y * scale;
+    svg.transition().duration(650)
+       .call(zoomBehavior.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
+    selectNode(n);
+  });
+}
+
+function buildFleet() {
+  fleetBuilt = true;
+  const allDevices = buildFleetData();
+
+  let activeStatus = 'all';
+  let activeSort   = 'status';
+  let searchTerm   = '';
+
+  const grid      = document.getElementById('fleet-grid');
+  const countEl   = document.getElementById('fleet-counts');
+
+  // status totals for toolbar badges
+  const totals = { error: 0, orphan: 0, active: 0, attached: 0, unreachable: 0 };
+  allDevices.forEach(d => { if (d.rolledStatus in totals) totals[d.rolledStatus]++; });
+  countEl.textContent =
+    `${allDevices.length} devices` +
+    (totals.error       ? ` · ${totals.error} error`      : '') +
+    (totals.orphan      ? ` · ${totals.orphan} orphan`     : '') +
+    (totals.active      ? ` · ${totals.active} active`     : '') +
+    (totals.unreachable ? ` · ${totals.unreachable} unreachable` : '');
+
+  function sortDevices(arr) {
+    return [...arr].sort((a, b) => {
+      if (activeSort === 'status') {
+        const diff = (STATUS_RANK[b.rolledStatus] || 0) - (STATUS_RANK[a.rolledStatus] || 0);
+        return diff !== 0 ? diff : a.host.localeCompare(b.host);
+      }
+      if (activeSort === 'rules') return b.ruleCount - a.ruleCount || a.host.localeCompare(b.host);
+      return a.host.localeCompare(b.host);  // 'name'
+    });
+  }
+
+  function render() {
+    const term = searchTerm.trim().toLowerCase();
+    const filtered = sortDevices(allDevices.filter(d => {
+      if (activeStatus !== 'all' && d.rolledStatus !== activeStatus) return false;
+      if (term && !d.host.toLowerCase().includes(term)) return false;
+      return true;
+    }));
+
+    if (filtered.length === 0) {
+      grid.innerHTML = '<div class="fleet-empty">No devices match the current filter.</div>';
+      return;
+    }
+
+    grid.innerHTML = filtered.map(d => {
+      const dots = [];
+      if (d.sc) {
+        if (d.sc.error    > 0) dots.push(`<span class="ft-dot err">&#9679; ${d.sc.error}</span>`);
+        if (d.sc.orphan   > 0) dots.push(`<span class="ft-dot orp">&#9679; ${d.sc.orphan}</span>`);
+        if (d.sc.active   > 0) dots.push(`<span class="ft-dot act">&#9679; ${d.sc.active}</span>`);
+        if (d.sc.attached > 0) dots.push(`<span class="ft-dot att">&#9679; ${d.sc.attached}</span>`);
+      }
+      const metaLine = d.rolledStatus === 'unreachable'
+        ? `<div class="ft-meta" style="color:#6b7280">unreachable</div>`
+        : `<div class="ft-meta">${d.ruleCount} iRule${d.ruleCount !== 1 ? 's' : ''} &middot; ${d.vsCount} VS</div>`;
+      return `<div class="fleet-tile st-${d.rolledStatus}" onclick="focusDevice(${JSON.stringify(d.host)})" title="${d.host}">
+        <div class="ft-host">${d.host}</div>
+        ${metaLine}
+        ${dots.length ? `<div class="ft-dots">${dots.join('')}</div>` : ''}
+      </div>`;
+    }).join('');
+  }
+
+  // ── toolbar wiring ──
+  document.getElementById('fleet-search').addEventListener('input', e => {
+    searchTerm = e.target.value;
+    render();
+  });
+
+  document.querySelectorAll('#fleet-status-filters .flt-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      activeStatus = btn.dataset.s;
+      document.querySelectorAll('#fleet-status-filters .flt-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      render();
+    });
+  });
+
+  document.querySelectorAll('.fsort-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      activeSort = btn.dataset.sort;
+      document.querySelectorAll('.fsort-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      render();
+    });
+  });
+
+  render();
 }
 
 // ── Sankey diagram ───────────────────────────────────────────────────────────
