@@ -2054,8 +2054,6 @@ function switchTab(name) {
   if (name === 'sankey' && !sankeyBuilt) buildSankey();
   if (name === 'fleet'  && !fleetBuilt)  buildFleet();
 }
-// Open Fleet by default
-switchTab('fleet');
 
 // ── Fleet view ───────────────────────────────────────────────────────────────
 let fleetBuilt = false;
@@ -2358,6 +2356,9 @@ function buildSankey() {
     .attr('fill', d => C[d.type]).attr('letter-spacing', '0.08em')
     .text(d => HDR[d.type] || d.type.toUpperCase());
 }
+
+// ── Default tab (must be last — all let variables must be declared first) ──
+switchTab('fleet');
 </script>
 </body>
 </html>
