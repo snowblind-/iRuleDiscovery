@@ -179,8 +179,17 @@ State the primary purpose of this iRule — what it is designed to do and what p
 ## 2. Execution Flow
 Describe step by step what happens when this iRule executes: which events trigger it, what conditions are evaluated, what variables are set, and what actions are taken.
 
-## 3. Overall Summary & Recommendations
-Summarise what this iRule accomplishes. Include specific, actionable recommendations to improve the logic, simplify the code, handle edge cases, or adopt a better approach where applicable.
+## 3. Recommendations
+Provide specific, actionable recommendations focused entirely on improving this iRule as BIG-IP TCL code. Consider:
+- Logic correctness and edge cases that are not handled
+- TCL coding best practices and efficiency improvements (e.g. avoid redundant commands, prefer built-in over custom logic)
+- Event selection — is this the most appropriate event, or would a different event be more efficient?
+- Performance — unnecessary work per request, commands that should be cached in variables, table/datagroup lookups that could be optimised
+- Security — input validation, header sanitisation, injection risks
+- Resilience — what happens if expected values are absent or malformed
+- Readability and maintainability of the TCL code
+
+Do NOT recommend migrating to any other platform or product. All recommendations must apply to this iRule running on BIG-IP.
 
 ---
 iRule source:
