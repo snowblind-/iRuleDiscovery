@@ -664,6 +664,10 @@ db_path = out / "irule_discovery.db"
 conn = open_db(out)
 init_db(conn)
 
+import json as _json
+manifest_path = out / "manifest.json"
+manifest_path.write_text(_json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+
 viewer = out / "irule_viewer.html"
 viewer.write_text(build_html(manifest, conn), encoding="utf-8")
 conn.close()

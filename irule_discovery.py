@@ -1284,22 +1284,34 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .ft-dot.att  { background: rgba(56,189,248,0.18); color: #7dd3fc; }
   .fleet-empty { grid-column: 1/-1; text-align: center; color: #4b5563; font-size: 0.85rem; padding: 60px 0; }
 
-  /* ── ServiceNow pane ── */
-  #snow-divider { display: none; background: #0d1117; border-top: 2px solid #1e3048; padding: 5px 14px; font-size: 0.68rem; font-weight: 600; color: #38bdf8; text-transform: uppercase; letter-spacing: 0.06em; cursor: pointer; user-select: none; flex-shrink: 0; align-items: center; gap: 6px; }
-  #snow-divider:hover { background: #111827; color: #7dd3fc; }
-  #snow-divider .snow-chevron { transition: transform 0.2s; font-style: normal; }
-  #snow-divider.collapsed .snow-chevron { transform: rotate(-90deg); }
-  #snow-badge { margin-left: 4px; background: #0c4a6e; color: #38bdf8; font-size: 0.60rem; font-weight: 700; border-radius: 10px; padding: 1px 7px; }
-  #snow-pane { overflow: auto; padding: 10px 14px; background: #080c12; display: none; flex-shrink: 0; max-height: 260px; }
-  #snow-pane.collapsed { display: none !important; }
-  .snow-ticket { border-left: 3px solid #0369a1; background: #050e18; border-radius: 4px; padding: 8px 10px; margin-bottom: 8px; }
+  /* ── ServiceNow trigger button ── */
+  #snow-trigger-btn { display: none; background: #0c2a3e; border: 1px solid #0369a1; color: #38bdf8; border-radius: 4px; padding: 3px 10px; font-size: 0.70rem; font-weight: 700; cursor: pointer; flex-shrink: 0; gap: 4px; transition: background 0.15s; }
+  #snow-trigger-btn:hover { background: #0f3a56; border-color: #38bdf8; }
+  #snow-trigger-count { font-size: 0.68rem; }
+
+  /* ── ServiceNow flyout ── */
+  #snow-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 1100; display: none; }
+  #snow-backdrop.open { display: block; }
+  #snow-flyout { position: fixed; top: 0; right: 0; width: 420px; max-width: 90vw; height: 100vh; background: #0a0f1a; border-left: 2px solid #0369a1; z-index: 1101; display: flex; flex-direction: column; transform: translateX(100%); transition: transform 0.28s cubic-bezier(0.4,0,0.2,1); box-shadow: -8px 0 32px rgba(0,0,0,0.6); }
+  #snow-flyout.open { transform: translateX(0); }
+  #snow-flyout-header { padding: 14px 16px 10px; background: #0d1a2e; border-bottom: 1px solid #1e3048; flex-shrink: 0; }
+  #snow-flyout-title { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  #snow-flyout-icon { font-size: 1rem; color: #38bdf8; font-style: normal; }
+  #snow-flyout-title > span:nth-child(2) { font-size: 0.80rem; font-weight: 700; color: #7dd3fc; text-transform: uppercase; letter-spacing: 0.06em; }
+  #snow-flyout-badge { background: #0c4a6e; color: #38bdf8; font-size: 0.60rem; font-weight: 700; border-radius: 10px; padding: 1px 8px; }
+  #snow-flyout-irule { font-family: 'JetBrains Mono',Consolas,monospace; font-size: 0.68rem; color: #4b5563; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #snow-flyout-close { position: absolute; top: 12px; right: 14px; background: none; border: none; color: #4b5563; font-size: 1rem; cursor: pointer; padding: 2px 6px; border-radius: 3px; }
+  #snow-flyout-close:hover { color: #94a3b8; background: #1e2638; }
+  #snow-flyout-body { flex: 1; overflow-y: auto; padding: 14px 16px; }
+  .snow-ticket { border-left: 3px solid #0369a1; background: #060e18; border-radius: 5px; padding: 10px 12px; margin-bottom: 10px; }
   .snow-ticket:last-child { margin-bottom: 0; }
-  .snow-ticket-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
-  .snow-num { font-family: 'JetBrains Mono',Consolas,monospace; font-size: 0.75rem; font-weight: 700; color: #38bdf8; text-decoration: none; }
+  .snow-ticket-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+  .snow-num { font-family: 'JetBrains Mono',Consolas,monospace; font-size: 0.78rem; font-weight: 700; color: #38bdf8; text-decoration: none; }
   .snow-num:hover { text-decoration: underline; color: #7dd3fc; }
-  .snow-type-badge { font-size: 0.60rem; font-weight: 700; background: #0c4a6e; color: #7dd3fc; border-radius: 3px; padding: 1px 5px; text-transform: uppercase; }
-  .snow-summary { font-size: 0.73rem; color: #94a3b8; line-height: 1.5; margin-bottom: 3px; }
-  .snow-ctx { font-family: 'JetBrains Mono',Consolas,monospace; font-size: 0.65rem; color: #4b5563; background: #0d1117; border-radius: 3px; padding: 4px 6px; margin-top: 4px; overflow-x: auto; white-space: pre; max-height: 60px; overflow-y: hidden; }
+  .snow-type-badge { font-size: 0.60rem; font-weight: 700; border-radius: 3px; padding: 2px 6px; text-transform: uppercase; }
+  .snow-summary { font-size: 0.75rem; color: #94a3b8; line-height: 1.6; margin-bottom: 6px; }
+  .snow-ctx { font-family: 'JetBrains Mono',Consolas,monospace; font-size: 0.65rem; color: #4b5563; background: #0d1117; border: 1px solid #1e2638; border-radius: 4px; padding: 6px 8px; overflow-x: auto; white-space: pre; line-height: 1.5; }
+  .snow-empty { color: #4b5563; font-size: 0.80rem; text-align: center; padding: 40px 0; }
 
   /* ── Tab bar ── */
   .tab-bar { display: flex; background: #161926; border-bottom: 1px solid #2d3148; padding: 0 16px; flex-shrink: 0; gap: 2px; }
@@ -1385,6 +1397,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <div id="rule-name-display">Select an iRule to view source</div>
       <button id="popout-btn" onclick="popoutPanel()" title="Open in floating window">&#x2922;</button>
       <button id="copy-btn" onclick="copyCode()">Copy</button>
+      <button id="snow-trigger-btn" onclick="openSNowFlyout()" title="View ServiceNow ticket references">&#10052; <span id="snow-trigger-count"></span></button>
     </div>
     <div id="source-pane">
       <div class="placeholder" id="placeholder">Click any iRule node in the diagram to view its source and AI analysis.</div>
@@ -1409,15 +1422,22 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <div class="ai-label none" id="ai-label">No analysis available</div>
       <div id="ai-text"></div>
     </div>
-    <div id="snow-divider">
-      <em class="snow-chevron">▾</em>
-      <span>ServiceNow References</span>
-      <span id="snow-badge"></span>
-    </div>
-    <div id="snow-pane">
-      <div id="snow-tickets"></div>
-    </div>
   </div>
+</div>
+
+<!-- ServiceNow flyout backdrop + panel -->
+<div id="snow-backdrop" onclick="closeSNowFlyout()"></div>
+<div id="snow-flyout">
+  <div id="snow-flyout-header">
+    <div id="snow-flyout-title">
+      <span id="snow-flyout-icon">&#10052;</span>
+      <span>ServiceNow References</span>
+      <span id="snow-flyout-badge"></span>
+    </div>
+    <div id="snow-flyout-irule"></div>
+    <button id="snow-flyout-close" onclick="closeSNowFlyout()" title="Close">&#10005;</button>
+  </div>
+  <div id="snow-flyout-body"></div>
 </div>
 
 <div id="popout-overlay" onclick="if(event.target===this)closePopout()">
@@ -1683,8 +1703,7 @@ function clearSelection() {
   document.getElementById('popout-btn').style.display = 'none';
   document.getElementById('ai-divider').style.display = 'none';
   document.getElementById('ai-pane').style.display = 'none';
-  document.getElementById('snow-divider').style.display = 'none';
-  document.getElementById('snow-pane').style.display = 'none';
+  document.getElementById('snow-trigger-btn').style.display = 'none';
   document.getElementById('rule-name-display').textContent = 'Select an iRule to view source';
 }
 
@@ -1907,46 +1926,32 @@ function showCode(d) {
   showSNow(d);
 }
 
-// ── ServiceNow pane ──────────────────────────────────────────────────────────
-let snowCollapsed = false;
+// ── ServiceNow flyout ────────────────────────────────────────────────────────
+// Set this to your ServiceNow instance base URL to make ticket numbers clickable
+// e.g. 'https://yourcompany.service-now.com'
+const SNOW_INSTANCE_URL = '';
 
-function toggleSNow() {
-  snowCollapsed = !snowCollapsed;
-  document.getElementById('snow-divider').classList.toggle('collapsed', snowCollapsed);
-  document.getElementById('snow-pane').style.display = snowCollapsed ? 'none' : 'block';
-}
-document.getElementById('snow-divider').addEventListener('click', toggleSNow);
+const TYPE_COLORS = {
+  INC: '#ef4444', CHG: '#f59e0b', RITM: '#8b5cf6', PRB: '#f87171',
+  REQ: '#10b981', TASK: '#6366f1', SCTASK: '#6366f1', STASK: '#6366f1',
+  CTASK: '#6366f1', CRQ: '#f59e0b',
+};
 
-const SNOW_INSTANCE_URL = '';  // set to 'https://yourcompany.service-now.com' to enable ticket links
+let _snowTickets  = [];
+let _snowIRuleName = '';
 
-function showSNow(d) {
-  const tickets = (d.servicenow_tickets || []);
-  const divEl   = document.getElementById('snow-divider');
-  const paneEl  = document.getElementById('snow-pane');
-  const listEl  = document.getElementById('snow-tickets');
-  const badgeEl = document.getElementById('snow-badge');
-
-  if (!tickets.length) { divEl.style.display = 'none'; paneEl.style.display = 'none'; return; }
-
-  badgeEl.textContent = tickets.length;
-
-  const TYPE_COLORS = {
-    INC:    '#ef4444', CHG:    '#f59e0b', RITM:   '#8b5cf6',
-    PRB:    '#f87171', REQ:    '#10b981', TASK:   '#6366f1',
-    SCTASK: '#6366f1', STASK:  '#6366f1', CTASK:  '#6366f1',
-    CRQ:    '#f59e0b',
-  };
-
-  listEl.innerHTML = tickets.map(t => {
+function _renderTickets(tickets) {
+  if (!tickets.length) return '<div class="snow-empty">No ServiceNow references found.</div>';
+  return tickets.map(t => {
     const color = TYPE_COLORS[t.ticket_type] || '#38bdf8';
     const href  = SNOW_INSTANCE_URL
       ? `${SNOW_INSTANCE_URL}/nav_to.do?uri=${encodeURIComponent(t.ticket_number)}`
-      : '#';
-    const numEl = SNOW_INSTANCE_URL
-      ? `<a class="snow-num" href="${href}" target="_blank">${t.ticket_number}</a>`
-      : `<span class="snow-num" style="cursor:default">${t.ticket_number}</span>`;
+      : null;
+    const numEl = href
+      ? `<a class="snow-num" href="${href}" target="_blank" rel="noopener">${t.ticket_number}</a>`
+      : `<span class="snow-num">${t.ticket_number}</span>`;
     const ctx = t.context_snippet
-      ? `<div class="snow-ctx">${t.context_snippet.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>`
+      ? `<div class="snow-ctx">${t.context_snippet.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>`
       : '';
     return `<div class="snow-ticket" style="border-left-color:${color}">
       <div class="snow-ticket-header">
@@ -1957,10 +1962,43 @@ function showSNow(d) {
       ${ctx}
     </div>`;
   }).join('');
-
-  divEl.style.display = 'flex';
-  if (!snowCollapsed) paneEl.style.display = 'block';
 }
+
+function showSNow(d) {
+  const tickets  = d.servicenow_tickets || [];
+  const trigBtn  = document.getElementById('snow-trigger-btn');
+  const countEl  = document.getElementById('snow-trigger-count');
+
+  _snowTickets   = tickets;
+  _snowIRuleName = d.full || '';
+
+  if (!tickets.length) {
+    trigBtn.style.display = 'none';
+    return;
+  }
+  countEl.textContent    = tickets.length;
+  trigBtn.style.display  = 'inline-flex';
+}
+
+function openSNowFlyout() {
+  document.getElementById('snow-flyout-badge').textContent  = _snowTickets.length;
+  document.getElementById('snow-flyout-irule').textContent  = _snowIRuleName;
+  document.getElementById('snow-flyout-body').innerHTML     = _renderTickets(_snowTickets);
+  document.getElementById('snow-backdrop').classList.add('open');
+  document.getElementById('snow-flyout').classList.add('open');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeSNowFlyout() {
+  document.getElementById('snow-backdrop').classList.remove('open');
+  document.getElementById('snow-flyout').classList.remove('open');
+  document.body.style.overflow = '';
+}
+
+// Close on Escape key
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeSNowFlyout();
+});
 
 function jumpToDup(key) {
   const rd = DATA.irules[key];
@@ -2502,12 +2540,16 @@ def db_get_servicenow_refs(conn: sqlite3.Connection, content_hash: str) -> list:
 
 
 def build_html(data: dict, conn: sqlite3.Connection | None = None) -> str:
-    # Enrich iRule entries with ServiceNow refs if DB connection provided
+    # Enrich iRule entries with ServiceNow refs if DB connection provided.
+    # NOTE: data["irules"] is keyed by irule_key (host::path), NOT content_hash.
+    #       The actual SHA-256 content_hash is inside each entry dict.
     if conn is not None:
-        for chash, entry in data.get("irules", {}).items():
-            refs = db_get_servicenow_refs(conn, chash)
-            if refs:
-                entry["servicenow_tickets"] = refs
+        for entry in data.get("irules", {}).values():
+            chash = entry.get("content_hash")
+            if chash:
+                refs = db_get_servicenow_refs(conn, chash)
+                if refs:
+                    entry["servicenow_tickets"] = refs
 
     # Escape </ so iRules containing </script> or </style> can't break the HTML parser.
     # \/ is valid JSON and browsers treat it identically to /.

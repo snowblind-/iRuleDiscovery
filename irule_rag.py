@@ -213,11 +213,18 @@ def load_manifest(out_dir: Path) -> dict:
 
 
 def irules_from_manifest(manifest: dict) -> list[dict]:
-    """Return a flat list of iRule entries with content_hash included."""
+    """Return a flat list of iRule entries with content_hash included.
+
+    The manifest dict is keyed by irule_key (host::path), NOT by content_hash.
+    Each entry already carries a 'content_hash' field (SHA-256 of the source).
+    We preserve that and fall back to the key only for legacy manifests that
+    pre-date the content_hash field.
+    """
     result = []
-    for chash, entry in manifest.get("irules", {}).items():
+    for key, entry in manifest.get("irules", {}).items():
         e = dict(entry)
-        e["content_hash"] = chash
+        if not e.get("content_hash"):
+            e["content_hash"] = key   # legacy fallback only
         result.append(e)
     return result
 
@@ -478,9 +485,14 @@ def run_rebuild_html(out_dir: Path) -> None:
     conn = open_db(out_dir)
     init_rag_tables(conn)
 
-    # Enrich each iRule entry with SNow refs
+    # Enrich each iRule entry with SNow refs.
+    # data["irules"] is keyed by irule_key (host::path); the actual SHA-256
+    # content_hash is stored inside each entry dict.
     enriched = 0
-    for chash, entry in data.get("irules", {}).items():
+    for entry in data.get("irules", {}).values():
+        chash = entry.get("content_hash")
+        if not chash:
+            continue
         rows = conn.execute(
             "SELECT ticket_number, ticket_type, context_snippet, llm_summary "
             "FROM servicenow_refs WHERE content_hash=? ORDER BY ticket_number",
