@@ -1201,12 +1201,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   #stats span { color: #64748b; }
   #stats b { color: #94a3b8; }
 
-  /* duplicate-info bar */
-  #dup-info { display: none; padding: 5px 14px; background: #1c1710; border-top: 1px solid #78350f; font-size: 0.7rem; flex-shrink: 0; gap: 8px; flex-wrap: wrap; align-items: baseline; }
-  .dup-badge { color: #fbbf24; font-weight: 700; margin-right: 6px; white-space: nowrap; }
-  .dup-link  { color: #60a5fa; cursor: pointer; text-decoration: underline; white-space: nowrap; margin-right: 8px; }
-  .dup-link:hover { color: #93c5fd; }
+  /* duplicate-info bar — collapsed by default, expand on click */
+  #dup-info { display: none; background: #1c1710; border-top: 1px solid #78350f; font-size: 0.7rem; flex-shrink: 0; flex-direction: column; }
+  .dup-header { display: flex; align-items: center; gap: 8px; padding: 5px 14px; cursor: pointer; user-select: none; }
+  .dup-header:hover { background: #231d13; }
+  .dup-badge { color: #fbbf24; font-weight: 700; white-space: nowrap; }
+  .dup-chevron { color: #78350f; font-size: 0.75rem; transition: transform 0.18s; font-style: normal; }
+  #dup-info.expanded .dup-chevron { transform: rotate(90deg); }
   .dup-hash  { color: #374151; font-family: monospace; font-size: 0.62rem; margin-left: auto; user-select: all; cursor: text; }
+  .dup-list  { display: none; padding: 0 14px 8px 24px; flex-wrap: wrap; gap: 4px 10px; }
+  #dup-info.expanded .dup-list { display: flex; }
+  .dup-link  { color: #60a5fa; cursor: pointer; text-decoration: underline; white-space: nowrap; font-size: 0.68rem; }
+  .dup-link:hover { color: #93c5fd; }
 
   /* XC library status bar */
   #xc-library-info { display: none; padding: 5px 14px; background: #0a1929; border-top: 1px solid #1e3a5f; font-size: 0.7rem; flex-shrink: 0; gap: 10px; align-items: center; flex-wrap: wrap; }
@@ -1284,10 +1290,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .ft-dot.att  { background: rgba(56,189,248,0.18); color: #7dd3fc; }
   .fleet-empty { grid-column: 1/-1; text-align: center; color: #4b5563; font-size: 0.85rem; padding: 60px 0; }
 
-  /* ── ServiceNow trigger button ── */
-  #snow-trigger-btn { display: none; background: #0c2a3e; border: 1px solid #0369a1; color: #38bdf8; border-radius: 4px; padding: 3px 10px; font-size: 0.70rem; font-weight: 700; cursor: pointer; flex-shrink: 0; gap: 4px; transition: background 0.15s; }
-  #snow-trigger-btn:hover { background: #0f3a56; border-color: #38bdf8; }
-  #snow-trigger-count { font-size: 0.68rem; }
+  /* ── ServiceNow section divider ── */
+  #snow-section-divider { display: none; background: #060f1c; border-top: 2px solid #0c4a6e; padding: 6px 14px; font-size: 0.68rem; font-weight: 700; color: #38bdf8; text-transform: uppercase; letter-spacing: 0.06em; cursor: pointer; user-select: none; flex-shrink: 0; align-items: center; gap: 7px; transition: background 0.12s; }
+  #snow-section-divider:hover { background: #091525; color: #7dd3fc; }
+  #snow-section-icon { font-style: normal; font-size: 0.85rem; }
+  #snow-section-badge { background: #0c4a6e; color: #38bdf8; font-size: 0.60rem; font-weight: 700; border-radius: 10px; padding: 1px 7px; }
+  #snow-section-arrow { margin-left: auto; color: #1e4a6e; font-size: 0.80rem; }
 
   /* ── ServiceNow flyout ── */
   #snow-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 1100; display: none; }
@@ -1397,7 +1405,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <div id="rule-name-display">Select an iRule to view source</div>
       <button id="popout-btn" onclick="popoutPanel()" title="Open in floating window">&#x2922;</button>
       <button id="copy-btn" onclick="copyCode()">Copy</button>
-      <button id="snow-trigger-btn" onclick="openSNowFlyout()" title="View ServiceNow ticket references">&#10052; <span id="snow-trigger-count"></span></button>
     </div>
     <div id="source-pane">
       <div class="placeholder" id="placeholder">Click any iRule node in the diagram to view its source and AI analysis.</div>
@@ -1421,6 +1428,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div id="ai-pane">
       <div class="ai-label none" id="ai-label">No analysis available</div>
       <div id="ai-text"></div>
+    </div>
+    <div id="snow-section-divider" onclick="openSNowFlyout()">
+      <span id="snow-section-icon">&#10052;</span>
+      <span>ServiceNow References</span>
+      <span id="snow-section-badge"></span>
+      <span id="snow-section-arrow">&#8594;</span>
     </div>
   </div>
 </div>
@@ -1703,7 +1716,7 @@ function clearSelection() {
   document.getElementById('popout-btn').style.display = 'none';
   document.getElementById('ai-divider').style.display = 'none';
   document.getElementById('ai-pane').style.display = 'none';
-  document.getElementById('snow-trigger-btn').style.display = 'none';
+  document.getElementById('snow-section-divider').style.display = 'none';
   document.getElementById('rule-name-display').textContent = 'Select an iRule to view source';
 }
 
@@ -1883,14 +1896,22 @@ function showCode(d) {
   // Duplicate info bar
   const dupEl   = document.getElementById('dup-info');
   const dupKeys = d.duplicate_keys || [];
+  dupEl.classList.remove('expanded');
   if (dupKeys.length > 0) {
     const shortHash = (d.content_hash || '').slice(0, 12);
     const links = dupKeys.map(k => {
-      const rd = DATA.irules[k];
-      const label = rd ? rd.path + (rd.host !== d.host ? ' \u2022 ' + rd.host : '') : k;
-      return `<span class="dup-link" onclick="jumpToDup('${k}')">${label}</span>`;
+      const rd    = DATA.irules[k];
+      const label = rd ? rd.path + (rd.host !== d.host ? ' \u00b7 ' + rd.host : '') : k;
+      const esc   = k.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+      return `<span class="dup-link" onclick="jumpToDup('${esc}')">${label}</span>`;
     }).join('');
-    dupEl.innerHTML = `<span class="dup-badge">\u26a0 ${dupKeys.length} duplicate${dupKeys.length > 1 ? 's' : ''}</span>${links}<span class="dup-hash" title="Content SHA-256">${shortHash}\u2026</span>`;
+    dupEl.innerHTML =
+      `<div class="dup-header" onclick="this.parentElement.classList.toggle('expanded')">` +
+        `<em class="dup-chevron">&#9654;</em>` +
+        `<span class="dup-badge">\u26a0 ${dupKeys.length} duplicate${dupKeys.length > 1 ? 's' : ''}</span>` +
+        `<span class="dup-hash" title="Content SHA-256">${shortHash}\u2026</span>` +
+      `</div>` +
+      `<div class="dup-list">${links}</div>`;
     dupEl.style.display = 'flex';
   } else {
     dupEl.style.display = 'none';
@@ -1965,19 +1986,19 @@ function _renderTickets(tickets) {
 }
 
 function showSNow(d) {
-  const tickets  = d.servicenow_tickets || [];
-  const trigBtn  = document.getElementById('snow-trigger-btn');
-  const countEl  = document.getElementById('snow-trigger-count');
+  const tickets = d.servicenow_tickets || [];
+  const divEl   = document.getElementById('snow-section-divider');
+  const badgeEl = document.getElementById('snow-section-badge');
 
   _snowTickets   = tickets;
   _snowIRuleName = d.full || '';
 
   if (!tickets.length) {
-    trigBtn.style.display = 'none';
+    divEl.style.display = 'none';
     return;
   }
-  countEl.textContent    = tickets.length;
-  trigBtn.style.display  = 'inline-flex';
+  badgeEl.textContent  = tickets.length;
+  divEl.style.display  = 'flex';
 }
 
 function openSNowFlyout() {
@@ -2007,7 +2028,8 @@ function jumpToDup(key) {
              ai_analysis: rd.ai_analysis, content_hash: rd.content_hash,
              duplicate_keys: rd.duplicate_keys || [],
              irule_status: rd.irule_status, stats: rd.stats,
-             stats_history: rd.stats_history || [] });
+             stats_history:      rd.stats_history      || [],
+             servicenow_tickets: rd.servicenow_tickets || [] });
   const n = nodes.find(x => x.id === key);
   if (n) selectNode(n);
 }
