@@ -589,6 +589,18 @@ def init_db(conn: sqlite3.Connection) -> None:
         events_json       TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_stats_hash ON irule_stats(content_hash, run_at);
+
+    CREATE TABLE IF NOT EXISTS servicenow_refs (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        content_hash     TEXT NOT NULL,
+        irule_path       TEXT NOT NULL,
+        ticket_number    TEXT NOT NULL,
+        ticket_type      TEXT NOT NULL,
+        context_snippet  TEXT,
+        llm_summary      TEXT,
+        found_at         TEXT NOT NULL,
+        UNIQUE(content_hash, ticket_number)
+    );
     """)
     conn.commit()
 
@@ -1272,6 +1284,23 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .ft-dot.att  { background: rgba(56,189,248,0.18); color: #7dd3fc; }
   .fleet-empty { grid-column: 1/-1; text-align: center; color: #4b5563; font-size: 0.85rem; padding: 60px 0; }
 
+  /* ── ServiceNow pane ── */
+  #snow-divider { display: none; background: #0d1117; border-top: 2px solid #1e3048; padding: 5px 14px; font-size: 0.68rem; font-weight: 600; color: #38bdf8; text-transform: uppercase; letter-spacing: 0.06em; cursor: pointer; user-select: none; flex-shrink: 0; align-items: center; gap: 6px; }
+  #snow-divider:hover { background: #111827; color: #7dd3fc; }
+  #snow-divider .snow-chevron { transition: transform 0.2s; font-style: normal; }
+  #snow-divider.collapsed .snow-chevron { transform: rotate(-90deg); }
+  #snow-badge { margin-left: 4px; background: #0c4a6e; color: #38bdf8; font-size: 0.60rem; font-weight: 700; border-radius: 10px; padding: 1px 7px; }
+  #snow-pane { overflow: auto; padding: 10px 14px; background: #080c12; display: none; flex-shrink: 0; max-height: 260px; }
+  #snow-pane.collapsed { display: none !important; }
+  .snow-ticket { border-left: 3px solid #0369a1; background: #050e18; border-radius: 4px; padding: 8px 10px; margin-bottom: 8px; }
+  .snow-ticket:last-child { margin-bottom: 0; }
+  .snow-ticket-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  .snow-num { font-family: 'JetBrains Mono',Consolas,monospace; font-size: 0.75rem; font-weight: 700; color: #38bdf8; text-decoration: none; }
+  .snow-num:hover { text-decoration: underline; color: #7dd3fc; }
+  .snow-type-badge { font-size: 0.60rem; font-weight: 700; background: #0c4a6e; color: #7dd3fc; border-radius: 3px; padding: 1px 5px; text-transform: uppercase; }
+  .snow-summary { font-size: 0.73rem; color: #94a3b8; line-height: 1.5; margin-bottom: 3px; }
+  .snow-ctx { font-family: 'JetBrains Mono',Consolas,monospace; font-size: 0.65rem; color: #4b5563; background: #0d1117; border-radius: 3px; padding: 4px 6px; margin-top: 4px; overflow-x: auto; white-space: pre; max-height: 60px; overflow-y: hidden; }
+
   /* ── Tab bar ── */
   .tab-bar { display: flex; background: #161926; border-bottom: 1px solid #2d3148; padding: 0 16px; flex-shrink: 0; gap: 2px; }
   .tab-btn { background: none; border: none; border-bottom: 2px solid transparent; color: #4b5563; font-size: 0.78rem; font-weight: 600; padding: 8px 18px; cursor: pointer; letter-spacing: 0.03em; transition: color 0.15s; margin-bottom: -1px; white-space: nowrap; }
@@ -1379,6 +1408,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div id="ai-pane">
       <div class="ai-label none" id="ai-label">No analysis available</div>
       <div id="ai-text"></div>
+    </div>
+    <div id="snow-divider">
+      <em class="snow-chevron">▾</em>
+      <span>ServiceNow References</span>
+      <span id="snow-badge"></span>
+    </div>
+    <div id="snow-pane">
+      <div id="snow-tickets"></div>
     </div>
   </div>
 </div>
@@ -1489,9 +1526,10 @@ function makeIRuleNode(rk, devHost) {
     content_hash:   rd ? rd.content_hash  : null,
     duplicate_keys: rd ? (rd.duplicate_keys  || []) : [],
     xc_library:     rd ? (rd.xc_library   || null) : null,
-    irule_status:   rd ? (rd.irule_status || 'attached') : 'attached',
-    stats:          rd ? (rd.stats        || null) : null,
-    stats_history:  rd ? (rd.stats_history || []) : [],
+    irule_status:        rd ? (rd.irule_status        || 'attached') : 'attached',
+    stats:               rd ? (rd.stats               || null) : null,
+    stats_history:       rd ? (rd.stats_history       || []) : [],
+    servicenow_tickets:  rd ? (rd.servicenow_tickets  || []) : [],
   };
 }
 
@@ -1645,6 +1683,8 @@ function clearSelection() {
   document.getElementById('popout-btn').style.display = 'none';
   document.getElementById('ai-divider').style.display = 'none';
   document.getElementById('ai-pane').style.display = 'none';
+  document.getElementById('snow-divider').style.display = 'none';
+  document.getElementById('snow-pane').style.display = 'none';
   document.getElementById('rule-name-display').textContent = 'Select an iRule to view source';
 }
 
@@ -1863,6 +1903,63 @@ function showCode(d) {
   document.getElementById('ai-divider').style.display = 'flex';
   if (!aiCollapsed)
     document.getElementById('ai-pane').style.display = 'block';
+
+  showSNow(d);
+}
+
+// ── ServiceNow pane ──────────────────────────────────────────────────────────
+let snowCollapsed = false;
+
+function toggleSNow() {
+  snowCollapsed = !snowCollapsed;
+  document.getElementById('snow-divider').classList.toggle('collapsed', snowCollapsed);
+  document.getElementById('snow-pane').style.display = snowCollapsed ? 'none' : 'block';
+}
+document.getElementById('snow-divider').addEventListener('click', toggleSNow);
+
+const SNOW_INSTANCE_URL = '';  // set to 'https://yourcompany.service-now.com' to enable ticket links
+
+function showSNow(d) {
+  const tickets = (d.servicenow_tickets || []);
+  const divEl   = document.getElementById('snow-divider');
+  const paneEl  = document.getElementById('snow-pane');
+  const listEl  = document.getElementById('snow-tickets');
+  const badgeEl = document.getElementById('snow-badge');
+
+  if (!tickets.length) { divEl.style.display = 'none'; paneEl.style.display = 'none'; return; }
+
+  badgeEl.textContent = tickets.length;
+
+  const TYPE_COLORS = {
+    INC:    '#ef4444', CHG:    '#f59e0b', RITM:   '#8b5cf6',
+    PRB:    '#f87171', REQ:    '#10b981', TASK:   '#6366f1',
+    SCTASK: '#6366f1', STASK:  '#6366f1', CTASK:  '#6366f1',
+    CRQ:    '#f59e0b',
+  };
+
+  listEl.innerHTML = tickets.map(t => {
+    const color = TYPE_COLORS[t.ticket_type] || '#38bdf8';
+    const href  = SNOW_INSTANCE_URL
+      ? `${SNOW_INSTANCE_URL}/nav_to.do?uri=${encodeURIComponent(t.ticket_number)}`
+      : '#';
+    const numEl = SNOW_INSTANCE_URL
+      ? `<a class="snow-num" href="${href}" target="_blank">${t.ticket_number}</a>`
+      : `<span class="snow-num" style="cursor:default">${t.ticket_number}</span>`;
+    const ctx = t.context_snippet
+      ? `<div class="snow-ctx">${t.context_snippet.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>`
+      : '';
+    return `<div class="snow-ticket" style="border-left-color:${color}">
+      <div class="snow-ticket-header">
+        ${numEl}
+        <span class="snow-type-badge" style="background:${color}22;color:${color}">${t.ticket_type}</span>
+      </div>
+      ${t.llm_summary ? `<div class="snow-summary">${t.llm_summary}</div>` : ''}
+      ${ctx}
+    </div>`;
+  }).join('');
+
+  divEl.style.display = 'flex';
+  if (!snowCollapsed) paneEl.style.display = 'block';
 }
 
 function jumpToDup(key) {
@@ -2391,7 +2488,27 @@ switchTab('fleet');
 """
 
 
-def build_html(data: dict) -> str:
+def db_get_servicenow_refs(conn: sqlite3.Connection, content_hash: str) -> list:
+    """Return all cached ServiceNow ticket references for an iRule."""
+    try:
+        rows = conn.execute(
+            "SELECT ticket_number, ticket_type, context_snippet, llm_summary "
+            "FROM servicenow_refs WHERE content_hash=? ORDER BY ticket_number",
+            (content_hash,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except sqlite3.OperationalError:
+        return []  # table not yet created (irule_rag.py never run)
+
+
+def build_html(data: dict, conn: sqlite3.Connection | None = None) -> str:
+    # Enrich iRule entries with ServiceNow refs if DB connection provided
+    if conn is not None:
+        for chash, entry in data.get("irules", {}).items():
+            refs = db_get_servicenow_refs(conn, chash)
+            if refs:
+                entry["servicenow_tickets"] = refs
+
     # Escape </ so iRules containing </script> or </style> can't break the HTML parser.
     # \/ is valid JSON and browsers treat it identically to /.
     safe_json = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
@@ -2534,7 +2651,7 @@ def main() -> None:
             manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
 
         html_path = out_dir / "irule_viewer.html"
-        html_path.write_text(build_html(manifest), encoding="utf-8")
+        html_path.write_text(build_html(manifest, conn), encoding="utf-8")
         print(f"[+] HTML viewer rebuilt → {html_path}")
         conn.close()
         webbrowser.open(html_path.resolve().as_uri())
@@ -2719,8 +2836,10 @@ def main() -> None:
     print(f"[+] Database → {out_dir / _DB_FILE}")
 
     if not args.no_html:
+        conn2 = open_db(out_dir)
         html_path = out_dir / "irule_viewer.html"
-        html_path.write_text(build_html(manifest), encoding="utf-8")
+        html_path.write_text(build_html(manifest, conn2), encoding="utf-8")
+        conn2.close()
         print(f"[+] HTML viewer written → {html_path}")
         webbrowser.open(html_path.resolve().as_uri())
 

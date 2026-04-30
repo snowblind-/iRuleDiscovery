@@ -41,6 +41,11 @@ Clicking an iRule node opens its TCL source code. If AI analysis has been run, t
 
 ![iRule Source and AI Analysis](docs/screenshot_ai_analysis.png)
 
+### ServiceNow References
+If `irule_rag.py --scan-snow` has been run, any ServiceNow ticket numbers (INC, CHG, RITM, PRB, TASK, …) found in the iRule's comments or code are displayed in a dedicated panel below the AI Analysis. Each ticket shows its type badge, LLM-generated summary of what the change relates to, and the original code context. Configure `SNOW_INSTANCE_URL` in the viewer to make ticket numbers clickable links directly into your ServiceNow instance.
+
+![ServiceNow References Panel](docs/screenshot_snow_panel.png)
+
 ### Sankey Flow
 Flow diagram mapping devices → virtual servers → iRules. Node width is proportional to the number of connections. Useful for identifying heavily shared iRules and VS dependency structure.
 
@@ -170,13 +175,72 @@ Analysis results are cached by SHA-256 content hash. An iRule that has not chang
 
 ---
 
+## Local RAG & ServiceNow Scanner (`irule_rag.py`)
+
+`irule_rag.py` uses a locally running [Ollama](https://ollama.com) instance with **Llama 3** (generation) and **nomic-embed-text** (embeddings) to extend iRule Discovery with two capabilities:
+
+### ServiceNow ticket detection
+
+Scans every iRule for ticket references (INC, CHG, RITM, PRB, TASK, SCTASK, …), uses the local LLM to summarise what each ticket relates to in context, and caches results in the SQLite database. The viewer displays them below the AI Analysis panel for each iRule.
+
+```bash
+# Install Ollama and pull the required models
+ollama pull llama3
+ollama pull nomic-embed-text
+
+# Scan all iRules for ServiceNow references (with LLM summaries)
+python3 irule_rag.py --scan-snow
+
+# Fast scan without LLM enrichment (regex only)
+python3 irule_rag.py --scan-snow --no-llm
+
+# Rebuild the viewer to include the new ServiceNow data
+python3 irule_rag.py --rebuild-html
+
+# Print all cached references in the terminal
+python3 irule_rag.py --show-snow
+```
+
+### Semantic RAG query
+
+Build a vector embedding index and ask natural-language questions about your iRules:
+
+```bash
+# Build (or refresh) the embedding index
+python3 irule_rag.py --build-index
+
+# Ask a question — retrieves the most relevant iRules and generates an answer
+python3 irule_rag.py --query "which iRules perform JWT validation?"
+python3 irule_rag.py --query "show me iRules that modify HTTP headers"
+python3 irule_rag.py --query "which iRules have rate limiting logic?"
+```
+
+### ServiceNow instance links
+
+To make ticket numbers in the viewer clickable links into your ServiceNow instance, set `SNOW_INSTANCE_URL` in the generated HTML or patch it in `irule_discovery.py`:
+
+```javascript
+// In irule_discovery.py HTML template, update this line:
+const SNOW_INSTANCE_URL = 'https://yourcompany.service-now.com';
+```
+
+---
+
 ## Requirements
 
 - Python 3.10+
 - Network access to BIG-IP iControl REST API (port 443)
-- An API key for at least one AI provider (optional — discovery and viewer work without AI)
 
-No third-party Python packages are required for discovery or viewer generation. The `generate_demo.py` script and screenshot tooling use `playwright` if installed.
+**Optional — AI analysis** (any one of):
+- Anthropic API key (`ANTHROPIC_API_KEY`)
+- OpenAI API key (`OPENAI_API_KEY`)
+- F5 Distributed Cloud API key (`F5_XC_API_KEY`)
+
+**Optional — Local RAG / ServiceNow scanner** (`irule_rag.py`):
+- [Ollama](https://ollama.com) running locally with `llama3` and `nomic-embed-text` pulled
+- `pip3 install requests ollama chromadb`
+
+No third-party Python packages are required for core discovery or viewer generation.
 
 ---
 
