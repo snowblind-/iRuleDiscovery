@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Generates a demo irule_viewer.html using synthetic multi-device data.
+Generates a demo irule_viewer.html using 10 synthetic BIG-IP devices.
 Simulates one week of 5-minute polling intervals (2,016 data points per iRule)
-with realistic business-hours traffic patterns.
-No BIG-IP required.  Run: python generate_demo.py
+with realistic business-hours traffic patterns and per-device scaling.
+No BIG-IP required.  Run: python3 generate_demo.py
 """
 
 import datetime
@@ -12,190 +12,228 @@ import random
 from pathlib import Path
 
 from irule_discovery import (
-    build_html, irule_key, content_hash, find_duplicate_irules,
-    compute_irule_status,
+    build_html, content_hash, find_duplicate_irules, compute_irule_status,
+    open_db, init_db,
 )
 
-random.seed(42)   # reproducible demo
-
-# ── AI analyses (iRule-focused, no migration recommendations) ────────────────
+# ── AI analyses ───────────────────────────────────────────────────────────────
 
 AI_ANALYSES = {
-    "irule_xff_insert": """\
+
+"irule_xff_insert": """\
 ## 1. Objective
-This iRule ensures every inbound HTTP request carries an accurate
-`X-Forwarded-For` header containing the real client IP address, and adds a
-companion `X-Real-IP` header for backends that prefer that field.
+Ensures every inbound HTTP request carries an accurate `X-Forwarded-For` header
+with the real client IP, and adds a companion `X-Real-IP` header for backends
+that prefer that field.
 
 ## 2. Execution Flow
 Triggered on `HTTP_REQUEST` for every inbound request.
-1. Checks whether an `X-Forwarded-For` header already exists.
-2. If it exists, **replaces** it with `[IP::client_addr]` — discarding any
-   prior chain supplied by an upstream proxy.
-3. If it does not exist, **inserts** a fresh header with the client address.
-4. Unconditionally inserts `X-Real-IP` with the same address.
+1. Checks whether `X-Forwarded-For` already exists.
+2. Replaces it with `[IP::client_addr]` if present, otherwise inserts it fresh.
+3. Unconditionally inserts `X-Real-IP` with the same address.
 
 ## 3. Recommendations
-- **Potential header-chain loss**: replacing an existing `X-Forwarded-For`
-  discards legitimate upstream proxy addresses. If BIG-IP sits behind another
-  load balancer, consider appending instead:
+- **Header-chain loss**: replacing an existing XFF discards upstream proxy hops.
+  If BIG-IP sits behind another LB, append instead:
   `HTTP::header replace "X-Forwarded-For" "[HTTP::header X-Forwarded-For], [IP::client_addr]"`
-- **Duplicate X-Real-IP**: if `X-Real-IP` is already present from an upstream
-  hop, a second value will be inserted. Add an existence check identical to the
-  `X-Forwarded-For` logic.
-- **Trusted proxy validation**: consider checking `[IP::client_addr]` against a
-  trusted-proxy datagroup before accepting any existing header value, to prevent
-  client spoofing.
-- **Event choice is correct**: `HTTP_REQUEST` is the right event; no improvement
-  needed there.""",
+- **Duplicate X-Real-IP**: add an existence check to avoid inserting twice.
+- **Trusted proxy validation**: check `[IP::client_addr]` against a trusted-proxy
+  datagroup before accepting any existing header value.""",
 
-    "irule_ssl_redirect": """\
+"irule_ssl_redirect": """\
 ## 1. Objective
 Redirects plain HTTP requests arriving on port 80 to the equivalent HTTPS URL,
 enforcing transport security for all clients.
 
 ## 2. Execution Flow
 Triggered on `HTTP_REQUEST`.
-1. Captures `[HTTP::host]` and `[HTTP::uri]` into local variables.
-2. Reads `[TCP::local_port]`; if it equals 80, issues an HTTP 302 redirect to
-   `https://<host><uri>`.
-3. Requests on any other port pass through without modification.
+1. Captures `[HTTP::host]` and `[HTTP::uri]`.
+2. If `[TCP::local_port]` equals 80, issues an HTTP 302 redirect to `https://`.
+3. Requests on other ports pass through unmodified.
 
 ## 3. Recommendations
-- **Use 301, not 302**: `HTTP::redirect` defaults to 302 (temporary). For an
-  SSL-enforcement redirect use a permanent 301 to allow browser caching:
-  `HTTP::respond 301 Location "https://${host}${uri}"`
-- **Port check is redundant on a dedicated HTTP VS**: if this iRule is only
-  applied to a port-80 virtual server the `[TCP::local_port] == 80` check is
-  unnecessary overhead every request. Remove the `if` block.
-- **HSTS header**: add `Strict-Transport-Security "max-age=31536000"` to the
+- **Use 301 not 302**: a permanent redirect allows browser caching and avoids
+  round-trips on repeat visits.
+- **Port check is redundant on a port-80-only VS**: remove the `if` block.
+- **Add HSTS**: include `Strict-Transport-Security "max-age=31536000"` in the
   redirect response to prevent future plain-HTTP attempts.
-- **Host header validation**: an empty or missing `Host` header would produce a
-  malformed redirect URL. Add a guard: `if { $host eq "" } { return }`.""",
+- **Guard empty Host**: an empty or missing `Host` produces a malformed redirect URL.""",
 
-    "irule_rate_limit": """\
+"irule_rate_limit": """\
 ## 1. Objective
 Implements a per-source-IP connection rate limiter using the BIG-IP `table`
-subsystem, rejecting clients that exceed 100 connections within a 60-second
-sliding window.
+subsystem, rejecting clients that exceed 100 connections within 60 seconds.
 
 ## 2. Execution Flow
-Triggered on `CLIENT_ACCEPTED` for every new TCP connection.
-1. Records the client IP in `$client_ip`.
-2. Atomically increments a table entry keyed by client IP using `table incr
-   -notouch`, which updates the value without resetting the TTL.
-3. On the first connection (`$conn_count == 1`), sets the entry with a 60-second
-   lifetime.
-4. If the count exceeds 100, logs a warning and calls `reject` to drop the
-   connection with a TCP RST.
+Triggered on `CLIENT_ACCEPTED`.
+1. Atomically increments a table entry keyed by client IP with `table incr -notouch`.
+2. On the first connection sets a 60-second lifetime for the entry.
+3. Rejects with TCP RST and logs when the count exceeds 100.
 
 ## 3. Recommendations
-- **Race condition on first connection**: `table incr -notouch` followed by
-  `table set` on count==1 is not atomic. Two simultaneous first-connections from
-  the same IP can both get count==1, causing the TTL never to be set. Use
-  `table set -notouch` with an `if { ![table exists $client_ip] }` guard, or
-  switch to `table add` which fails silently if the key already exists.
-- **`-notouch` prevents TTL reset but also prevents sliding window**: every hit
-  after the first does not refresh the timer. A client can make 100 connections
-  in second 1, wait 60 seconds, then make another 100. This is a fixed-window,
-  not a sliding-window limiter. Document this clearly or implement a true sliding
-  window.
-- **`reject` vs `drop`**: `reject` sends a TCP RST, which is detectable by
-  scanners. Consider `drop` to silently discard the packet instead.
-- **Log rate**: `log local0.warn` on every rejected connection can flood the
-  syslog under a real attack. Throttle with a separate table entry for the last
-  log time per IP.""",
+- **Race condition on first connection**: use `table add` (fails silently if the
+  key exists) instead of the incr-then-set pattern.
+- **Fixed window, not sliding window**: document this or implement a true sliding
+  window if the use-case demands it.
+- **Use `drop` over `reject`**: `reject` sends a TCP RST that is detectable by
+  scanners; `drop` silently discards.
+- **Log rate**: throttle syslog under attack with a rate-limit table entry.""",
 
-    "irule_jwt_validate": """\
+"irule_jwt_validate": """\
 ## 1. Objective
 Enforces that all inbound HTTP requests carry a Bearer token in the
-`Authorization` header, returning a 401 to unauthenticated requests and
-forwarding the raw token to the upstream pool as `X-Token-Hint`.
+`Authorization` header, returning 401 to unauthenticated requests and
+forwarding the raw token upstream as `X-Token-Hint`.
 
 ## 2. Execution Flow
 Triggered on `HTTP_REQUEST`.
-1. Reads the `Authorization` header into `$auth_header`.
-2. If the value does not begin with `"Bearer "`, responds immediately with
-   HTTP 401, `Content-Type: application/json`, and `WWW-Authenticate` challenge.
-3. If valid prefix found, strips the seven-character `"Bearer "` prefix and
-   stores the token in `$token`.
-4. Inserts `X-Token-Hint: <token>` header and allows the request to proceed.
+1. Reads the `Authorization` header.
+2. If the value doesn't begin with `"Bearer "`, responds with HTTP 401.
+3. Otherwise strips the prefix, stores the token, and inserts `X-Token-Hint`.
 
 ## 3. Recommendations
-- **Token is not validated**: the iRule only checks the prefix, not the token
-  value. A request with `Authorization: Bearer invalid` passes through.
-  Validate the token with an iRule LX (Node.js) call or `CRYPTO::verify` if
-  HS256/RS256 is in use.
-- **X-Token-Hint exposes credentials upstream**: forwarding the raw token to
-  pool members may be an intentional design, but it should be documented as a
-  security decision. If the upstream does not need it, remove the insert.
-- **Case sensitivity**: `starts_with "Bearer "` is case-sensitive in TCL.
-  RFC 6750 says the scheme is case-insensitive. Normalise with
-  `string tolower [string range $auth_header 0 6]` before comparing.
-- **Empty Authorization header**: an empty string will fail the `starts_with`
-  check correctly, but logging the failure helps with debugging. Add
-  `log local0.debug "401 no Bearer from [IP::client_addr]"`.""",
+- **Token is not validated**: only the prefix is checked. Use iRule LX or
+  `CRYPTO::verify` to validate the token signature.
+- **X-Token-Hint exposes credentials upstream**: document this as a deliberate
+  security decision or remove it.
+- **Case sensitivity**: RFC 6750 says the scheme is case-insensitive. Normalise
+  with `string tolower` before comparing.
+- **Log rejections**: `log local0.debug "401 no Bearer from [IP::client_addr]"`.""",
 
-    "irule_maintenance_page": """\
+"irule_maintenance_page": """\
 ## 1. Objective
-Serves a static HTML 503 maintenance page when all pool members are
-unavailable, preventing the client from receiving a generic BIG-IP error.
+Serves a static HTML 503 maintenance page when all pool members are unavailable,
+preventing the client from receiving a generic BIG-IP error page.
 
 ## 2. Execution Flow
 Triggered on `HTTP_REQUEST`.
-1. Calls `[active_members [LB::server pool]]` to count healthy pool members.
-2. If the count is zero, responds immediately with HTTP 503, inline HTML body,
-   `Content-Type: text/html`, and `Retry-After: 3600`.
+1. Calls `[active_members]` to count healthy pool members.
+2. If zero, responds immediately with HTTP 503, inline HTML, and `Retry-After: 3600`.
 3. If members are available, the request is forwarded normally.
 
 ## 3. Recommendations
-- **Better event: `HTTP_RESPONSE` or LB::FAILED event**: checking on every
-  `HTTP_REQUEST` adds an `active_members` lookup to 100% of traffic. Use the
-  `LB_FAILED` event instead — it fires only when load balancing actually fails,
-  eliminating the per-request overhead.
-- **Inline HTML is fragile**: the HTML is embedded as a TCL string literal. Use
-  an iFile for the maintenance page so it can be updated without editing the
-  iRule: `ifile get /Common/maintenance.html`.
-- **`Retry-After` is hardcoded**: 3600 seconds may not match the actual expected
-  downtime. Make this value configurable via a datagroup or iRule variable.
-- **No logging**: add `log local0.warn "503 maintenance page served — 0 active
-  members in [LB::server pool]"` to create an audit trail.""",
+- **Use `LB_FAILED` event**: checking on every request adds an `active_members`
+  lookup to 100% of traffic. `LB_FAILED` fires only when LB actually fails.
+- **Inline HTML is fragile**: use `ifile get /Common/maintenance.html` so the
+  page can be updated without editing the iRule.
+- **Hardcoded Retry-After**: make this configurable via a datagroup.
+- **Add logging**: create an audit trail with `log local0.warn`.""",
 
-    "irule_geo_block": """\
+"irule_geo_block": """\
 ## 1. Objective
-Blocks HTTP requests originating from countries listed in a `blocked_countries`
-data group, using BIG-IP's built-in IP geolocation database.
+Blocks HTTP requests from countries listed in a `blocked_countries` datagroup
+using BIG-IP's built-in IP geolocation database.
 
 ## 2. Execution Flow
 Triggered on `HTTP_REQUEST`.
-1. Looks up the two-letter country code for `[IP::client_addr]` using the
-   `whereis` command.
-2. Checks whether the result matches any entry in the `blocked_countries`
-   datagroup via `matchclass`.
-3. If matched, logs the event and responds with HTTP 403 and plain-text body.
-4. If not matched, the request proceeds to the pool.
+1. Looks up the two-letter country code with `whereis`.
+2. Checks against the `blocked_countries` datagroup via `matchclass`.
+3. Returns HTTP 403 and logs if matched; otherwise forwards normally.
 
 ## 3. Recommendations
-- **`whereis` is deprecated**: the `whereis` command is legacy; prefer
-  `[IP::country [IP::client_addr]]` which uses the same GeoIP database but is
-  the current supported interface and avoids string parsing.
-- **Log volume**: `log local0.info` on every blocked request can be noisy for
-  heavily targeted regions. Use a rate-limited log or write to an HSL pool
-  instead of local syslog.
-- **Datagroup lookup is exact-match only**: `matchclass … equals` checks for an
-  exact two-letter code. Verify the `blocked_countries` datagroup contains
-  ISO 3166-1 alpha-2 codes in the same case that `[IP::country]` returns
-  (uppercase). A mismatch silently bypasses the block.
-- **No IPv6 handling**: `[IP::client_addr]` returns an IPv6 address for v6
-  clients. Confirm that the GeoIP database has IPv6 coverage and that the
-  datagroup format handles IPv6-mapped IPv4 addresses correctly.""",
+- **`whereis` is deprecated**: prefer `[IP::country [IP::client_addr]]` — the
+  current supported interface.
+- **Log volume**: use HSL or rate-limited logging for heavily targeted regions.
+- **Case sensitivity**: verify the datagroup contains uppercase ISO 3166-1 codes
+  to match what `[IP::country]` returns.
+- **No IPv6 handling**: confirm GeoIP database coverage for IPv6 clients.""",
+
+"irule_header_sanitize": """\
+## 1. Objective
+Strips sensitive internal headers that clients could inject to bypass security
+controls, and truncates oversized User-Agent strings to prevent buffer-related
+issues in upstream applications.
+
+## 2. Execution Flow
+Triggered on `HTTP_REQUEST`.
+1. Iterates a hardcoded list of four sensitive header names.
+2. Removes each header if present using `HTTP::header remove`.
+3. Reads the User-Agent header and truncates it to 512 characters if longer.
+
+## 3. Recommendations
+- **Use a datagroup for the header list**: move sensitive header names to a
+  string-type datagroup so operators can update them without a code change.
+- **`foreach` overhead**: iterate `HTTP::header names` and filter once rather
+  than calling `HTTP::header exists` per hard-coded name.
+- **Truncation vs removal**: for security-sensitive headers, removal is safer
+  than truncation. Document the rationale for the 512-byte threshold.
+- **Missing response sanitisation**: add `HTTP_RESPONSE` to strip any internal
+  headers that pool members emit on the way back.""",
+
+"irule_uri_rewrite": """\
+## 1. Objective
+Rewrites legacy `/api/v1/` paths to their v2 equivalents for transparent backend
+migration and normalises URLs by removing trailing slashes via redirect.
+
+## 2. Execution Flow
+Triggered on `HTTP_REQUEST`.
+1. Reads the current URI into `$uri`.
+2. If the URI starts with `/api/v1/`, rewrites to `/api/v2/` and inserts
+   `X-Rewritten-From` for audit visibility.
+3. If the URI ends with `/` (but is not the root), issues a 302 redirect
+   removing the trailing slash.
+
+## 3. Recommendations
+- **Trailing-slash redirect after v1 rewrite**: a `/api/v1/foo/` request matches
+  both branches — the rewrite runs first, then the redirect fires on the rewritten
+  URI. Add `return` after the v2 rewrite to prevent double-processing.
+- **Redirect scheme**: `[HTTP::host]` may omit the port. Reconstruct the full URL
+  from `[HTTP::host]:[TCP::local_port]` or use `[HTTP::header "Host"]`.
+- **`X-Rewritten-From` from untrusted clients**: remove or replace this header if
+  it is already present from the client before inserting your own value.""",
+
+"irule_bot_detect": """\
+## 1. Objective
+Blocks requests whose User-Agent matches a list of known scanning and attack tools,
+and rejects requests with an empty User-Agent which is common bot behaviour.
+
+## 2. Execution Flow
+Triggered on `HTTP_REQUEST`.
+1. Lower-cases the User-Agent into `$ua`.
+2. Iterates a hardcoded list of 7 bot signatures using `foreach` / `contains`.
+3. Returns HTTP 403 with a `log local0.warn` on any match.
+4. Returns HTTP 400 on empty User-Agent.
+
+## 3. Recommendations
+- **Use a datagroup**: move bot signatures to a string-type datagroup and use
+  `matchclass` — faster and operator-updatable without a code change.
+- **`contains` matches substrings**: `"masscan"` would match `"notmasscan"`.
+  Use exact-match datagroup entries or anchor the match more precisely.
+- **Empty User-Agent is aggressive**: health-check and monitoring agents often
+  omit User-Agent. Allowlist trusted source IPs before this check.
+- **Log rate risk**: throttle `log local0.warn` per source IP using the table
+  command to avoid syslog flooding during a scan.""",
+
+"irule_log_hsl": """\
+## 1. Objective
+Implements high-speed request/response logging via a UDP HSL channel, emitting
+a structured syslog-format record containing client IP, HTTP method, URI, status
+code, and request latency for each transaction.
+
+## 2. Execution Flow
+`HTTP_REQUEST`: opens HSL channel, generates request ID, records start timestamp,
+inserts `X-Request-ID` header.
+`HTTP_RESPONSE`: computes latency from stored timestamp, emits the log record via
+`HSL::send`.
+
+## 3. Recommendations
+- **HSL::open on every request is expensive**: open the channel once with a
+  static variable — `if { ![info exists hsl] } { set hsl [HSL::open …] }`.
+- **`rand()` for request ID collides**: combine `[clock microseconds]` with
+  `[IP::client_addr]` for a low-collision ID.
+- **Variables across events**: `$req_time` and `$request_id` rely on session
+  persistence between events — test under HTTP/2 multiplexing.
+- **Log format with spaces in URI**: URL-encode or quote field values to prevent
+  unparseable log records if the URI contains spaces.""",
 }
 
-# ── iRule TCL source ─────────────────────────────────────────────────────────
+# ── iRule TCL source ──────────────────────────────────────────────────────────
 
 IRULES = {
-    "irule_xff_insert": """\
-# Insert X-Forwarded-For header with the client IP address
+
+"irule_xff_insert": """\
+# Insert X-Forwarded-For and X-Real-IP headers with the client IP address
+# CHG0042891 — required for upstream application to see real client IP
 when HTTP_REQUEST {
     if { [HTTP::header exists "X-Forwarded-For"] } {
         HTTP::header replace "X-Forwarded-For" [IP::client_addr]
@@ -205,8 +243,9 @@ when HTTP_REQUEST {
     HTTP::header insert "X-Real-IP" [IP::client_addr]
 }""",
 
-    "irule_ssl_redirect": """\
+"irule_ssl_redirect": """\
 # Redirect plain HTTP traffic to HTTPS
+# INC0018374 — added to enforce TLS across all public virtual servers
 when HTTP_REQUEST {
     set host [HTTP::host]
     set uri  [HTTP::uri]
@@ -215,8 +254,9 @@ when HTTP_REQUEST {
     }
 }""",
 
-    "irule_rate_limit": """\
+"irule_rate_limit": """\
 # Simple connection rate limiter using the table command
+# RITM0098312 — rate limiting per client IP, 100 req/s burst, 60s window
 when CLIENT_ACCEPTED {
     set client_ip [IP::client_addr]
     set conn_count [table incr -notouch $client_ip]
@@ -229,8 +269,9 @@ when CLIENT_ACCEPTED {
     }
 }""",
 
-    "irule_jwt_validate": """\
+"irule_jwt_validate": """\
 # Validate Bearer token presence and forward to pool
+# CHG0051209 — added JWT gate for API endpoints, see PRB0007412 for token leak fix
 when HTTP_REQUEST {
     set auth_header [HTTP::header "Authorization"]
     if { not ($auth_header starts_with "Bearer ") } {
@@ -243,7 +284,7 @@ when HTTP_REQUEST {
     HTTP::header insert "X-Token-Hint" $token
 }""",
 
-    "irule_maintenance_page": """\
+"irule_maintenance_page": """\
 # Return a maintenance page when the pool has no active members
 when HTTP_REQUEST {
     if { [active_members [LB::server pool]] == 0 } {
@@ -255,8 +296,9 @@ when HTTP_REQUEST {
     }
 }""",
 
-    "irule_geo_block": """\
+"irule_geo_block": """\
 # Block requests from specific countries using IP geolocation class
+# CHG0038100 — geo-blocking added per compliance requirement REQ0002847
 when HTTP_REQUEST {
     set country [whereis [IP::client_addr] country]
     if { [matchclass $country equals blocked_countries] } {
@@ -264,72 +306,133 @@ when HTTP_REQUEST {
         HTTP::respond 403 content "Access Denied" "Content-Type" "text/plain"
     }
 }""",
+
+"irule_header_sanitize": """\
+# Strip sensitive internal headers and sanitize User-Agent length
+# INC0021009 — SSRF via X-Internal-Token injection discovered in pentest
+when HTTP_REQUEST {
+    foreach header { "X-Internal-Token" "X-Admin-Key" "X-Debug-Mode" "X-Original-IP" } {
+        if { [HTTP::header exists $header] } {
+            HTTP::header remove $header
+        }
+    }
+    set ua [HTTP::header "User-Agent"]
+    if { [string length $ua] > 512 } {
+        HTTP::header replace "User-Agent" [string range $ua 0 511]
+    }
+}""",
+
+"irule_uri_rewrite": """\
+# Rewrite legacy API v1 paths to v2 and normalise trailing slashes
+# RITM0110045 — v1-to-v2 migration shim, retire after Q3 cutover
+when HTTP_REQUEST {
+    set uri [HTTP::uri]
+    if { $uri starts_with "/api/v1/" } {
+        set new_uri "/api/v2/[string range $uri 8 end]"
+        HTTP::uri $new_uri
+        HTTP::header insert "X-Rewritten-From" $uri
+    }
+    if { $uri ends_with "/" && $uri ne "/" } {
+        HTTP::redirect "[HTTP::host][string range $uri 0 end-1]"
+    }
+}""",
+
+"irule_bot_detect": """\
+# Detect and block known scanner and bot User-Agent strings
+# CHG0059933 — added after bot-driven load spike, INC0031877
+when HTTP_REQUEST {
+    set ua [string tolower [HTTP::header "User-Agent"]]
+    set bad_bots [list "masscan" "zgrab" "nikto" "sqlmap" "nmap" "nuclei" "dirbuster"]
+    foreach bot $bad_bots {
+        if { $ua contains $bot } {
+            log local0.warn "Bot blocked: $bot from [IP::client_addr]"
+            HTTP::respond 403 content "Forbidden" "Content-Type" "text/plain"
+            return
+        }
+    }
+    if { $ua eq "" } {
+        HTTP::respond 400 content "Bad Request" "Content-Type" "text/plain"
+        return
+    }
+}""",
+
+"irule_log_hsl": """\
+# High-speed logging of HTTP requests and response codes via UDP HSL
+# RITM0088271 — centralised request logging for SIEM ingestion
+when HTTP_REQUEST {
+    set hsl [HSL::open -proto UDP /Common/hsl-pool]
+    set request_id [expr { int(rand() * 1000000) }]
+    set req_time [clock milliseconds]
+    set client_ip [IP::client_addr]
+    set method [HTTP::method]
+    set uri [HTTP::uri]
+    HTTP::header insert "X-Request-ID" $request_id
+}
+when HTTP_RESPONSE {
+    set resp_time [expr { [clock milliseconds] - $req_time }]
+    HSL::send $hsl "<190>[F5] client=$client_ip method=$method uri=$uri status=[HTTP::status] latency=${resp_time}ms reqid=$request_id"
+}""",
 }
 
-# ── Traffic profiles ─────────────────────────────────────────────────────────
-# base_rate   : average executions per 5-min interval at peak business hours
-# error_rate  : fraction of intervals that have failures or aborts (0–1)
-# weekend_frac: traffic level on weekends relative to weekday peak
-# night_frac  : traffic level overnight (midnight–6am) relative to peak
+# ── Traffic profiles ──────────────────────────────────────────────────────────
+# (base_rate, error_rate, weekend_frac, night_frac)
 
 TRAFFIC = {
-    #                     base  err_rate  weekend  night
-    "irule_xff_insert":   (85,   0.00,    0.20,    0.04),
-    "irule_ssl_redirect": (50,   0.00,    0.25,    0.05),
-    "irule_rate_limit":   (130,  0.00,    0.18,    0.03),
-    "irule_jwt_validate": (40,   0.04,    0.15,    0.08),   # API — some bad tokens
-    "irule_maintenance_page": (3, 0.00,   0.30,    0.10),   # rarely triggered
-    "irule_geo_block":    (28,   0.02,    0.20,    0.05),   # occasional failures
+    "irule_xff_insert":       ( 85,  0.00, 0.20, 0.04),
+    "irule_ssl_redirect":     ( 50,  0.00, 0.25, 0.05),
+    "irule_rate_limit":       (130,  0.00, 0.18, 0.03),
+    "irule_jwt_validate":     ( 40,  0.04, 0.15, 0.08),
+    "irule_maintenance_page": (  3,  0.00, 0.30, 0.10),
+    "irule_geo_block":        ( 28,  0.02, 0.20, 0.05),
+    "irule_header_sanitize":  ( 72,  0.00, 0.22, 0.04),
+    "irule_uri_rewrite":      ( 55,  0.01, 0.18, 0.06),
+    "irule_bot_detect":       ( 18,  0.08, 0.25, 0.15),  # high error rate — lots of bots
+    "irule_log_hsl":          (110,  0.01, 0.20, 0.05),
 }
 
 
 def _time_factor(ts: datetime.datetime, weekend_frac: float,
                  night_frac: float) -> float:
-    """Return a multiplier (0–1) based on time of day and day of week."""
-    dow  = ts.weekday()   # 0=Monday
+    dow  = ts.weekday()
     hour = ts.hour + ts.minute / 60.0
-
-    if dow >= 5:          # weekend
+    if dow >= 5:
         base = weekend_frac
-    elif 9 <= hour < 17:  # business hours
+    elif 9 <= hour < 17:
         base = 1.0
     elif 7 <= hour < 9 or 17 <= hour < 20:
         base = 0.40
     else:
         base = night_frac
-
-    # Smooth with a cosine so there are no hard edges
     phase = math.cos(math.pi * hour / 12) * 0.08
     return max(0.01, base + phase)
 
 
-def generate_stats_history(short_name: str) -> list[dict]:
+def generate_stats_history(short_name: str, scale: float = 1.0,
+                            seed: int = 42) -> list[dict]:
     """
-    Produce 2,016 five-minute snapshots spanning exactly one week.
-    Returns history with both cumulative total_executions and
-    delta_executions (executions since previous poll).
+    Produce 2,016 five-minute snapshots spanning one week.
+    scale adjusts the base traffic level (e.g. 0.03 for DR standby).
+    seed ensures each device+iRule combination is independently reproducible.
     """
+    random.seed(seed)
     base, err_rate, wknd, night = TRAFFIC[short_name]
+    base = max(1, int(base * scale))
 
-    now   = datetime.datetime.now(datetime.timezone.utc).replace(second=0, microsecond=0, tzinfo=None)
-    # Align to next 5-min boundary
+    now   = datetime.datetime.now(datetime.timezone.utc).replace(
+                second=0, microsecond=0, tzinfo=None)
     now  -= datetime.timedelta(minutes=now.minute % 5)
     start = now - datetime.timedelta(weeks=1)
 
     INTERVAL   = datetime.timedelta(minutes=5)
-    N          = 7 * 24 * 12   # 2,016 points
-
+    N          = 7 * 24 * 12  # 2,016 points
     history    = []
-    cumulative = random.randint(5_000, 200_000)   # plausible starting counter
+    cumulative = random.randint(5_000, 200_000)
 
     for i in range(N):
         ts     = start + INTERVAL * i
         factor = _time_factor(ts, wknd, night)
-
-        # Gaussian noise around the time-scaled base rate
         delta  = max(0, int(base * factor * random.gauss(1.0, 0.28)))
 
-        # Sporadic failures / aborts
         failures = aborts = 0
         if err_rate > 0 and random.random() < err_rate:
             failures = random.randint(1, max(1, delta // 20 + 1))
@@ -338,134 +441,236 @@ def generate_stats_history(short_name: str) -> list[dict]:
 
         cumulative += delta
         history.append({
-            "run_at":            ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "total_executions":  cumulative,
-            "delta_executions":  delta,
-            "failures":          failures,
-            "aborts":            aborts,
+            "run_at":           ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "total_executions": cumulative,
+            "delta_executions": delta,
+            "failures":         failures,
+            "aborts":           aborts,
         })
 
     return history
 
 
-# ── Two synthetic BIG-IP devices ─────────────────────────────────────────────
+# ── 10 synthetic BIG-IP devices ───────────────────────────────────────────────
+#
+# scale  : traffic multiplier (1.0 = prod, 0.03 = DR standby, 0 = unreachable)
+# error  : set to a string to mark the device as unreachable
 
 DEVICES = [
+    # ── Production data-centre 1 ─────────────────────────────────────────────
     {
-        "host": "bigip-dc1.example.com",
+        "host":  "bigip-prod-dc1.example.com",
+        "scale": 1.0,
         "virtual_servers": [
-            {
-                "name":       "vs_web_443",
-                "full_path":  "/Common/vs_web_443",
-                "partition":  "Common",
-                "rules":      ["irule_xff_insert", "irule_ssl_redirect", "irule_rate_limit"],
-            },
-            {
-                "name":       "vs_api_8443",
-                "full_path":  "/Common/vs_api_8443",
-                "partition":  "Common",
-                "rules":      ["irule_jwt_validate", "irule_rate_limit"],
-            },
-            {
-                "name":       "vs_legacy_80",
-                "full_path":  "/Common/vs_legacy_80",
-                "partition":  "Common",
-                "rules":      ["irule_ssl_redirect", "irule_maintenance_page"],
-            },
+            {"name": "vs_web_443",    "full_path": "/Common/vs_web_443",
+             "rules": ["irule_xff_insert", "irule_ssl_redirect", "irule_rate_limit"]},
+            {"name": "vs_api_8443",   "full_path": "/Common/vs_api_8443",
+             "rules": ["irule_jwt_validate", "irule_rate_limit", "irule_log_hsl"]},
+            {"name": "vs_legacy_80",  "full_path": "/Common/vs_legacy_80",
+             "rules": ["irule_ssl_redirect", "irule_maintenance_page"]},
+            {"name": "vs_internal",   "full_path": "/Prod/vs_internal",
+             "rules": ["irule_header_sanitize", "irule_log_hsl"]},
         ],
     },
+    # ── Production data-centre 2 ─────────────────────────────────────────────
     {
-        "host": "bigip-dc2.example.com",
+        "host":  "bigip-prod-dc2.example.com",
+        "scale": 1.0,
         "virtual_servers": [
-            {
-                "name":       "vs_public_443",
-                "full_path":  "/Common/vs_public_443",
-                "partition":  "Common",
-                "rules":      ["irule_geo_block", "irule_xff_insert", "irule_rate_limit"],
-            },
-            {
-                "name":       "vs_internal_api",
-                "full_path":  "/Prod/vs_internal_api",
-                "partition":  "Prod",
-                "rules":      ["irule_jwt_validate"],
-            },
+            {"name": "vs_public_443",   "full_path": "/Common/vs_public_443",
+             "rules": ["irule_geo_block", "irule_xff_insert", "irule_rate_limit"]},
+            {"name": "vs_internal_api", "full_path": "/Prod/vs_internal_api",
+             "rules": ["irule_jwt_validate", "irule_log_hsl"]},
+            {"name": "vs_web_80",       "full_path": "/Common/vs_web_80",
+             "rules": ["irule_ssl_redirect", "irule_xff_insert"]},
         ],
+    },
+    # ── Disaster recovery site 1 (standby — minimal traffic) ─────────────────
+    {
+        "host":  "bigip-dr1.example.com",
+        "scale": 0.03,
+        "virtual_servers": [
+            {"name": "vs_web_443",  "full_path": "/Common/vs_web_443",
+             "rules": ["irule_xff_insert", "irule_ssl_redirect", "irule_rate_limit"]},
+            {"name": "vs_api_8443", "full_path": "/Common/vs_api_8443",
+             "rules": ["irule_jwt_validate"]},
+        ],
+    },
+    # ── Disaster recovery site 2 (standby) ────────────────────────────────────
+    {
+        "host":  "bigip-dr2.example.com",
+        "scale": 0.03,
+        "virtual_servers": [
+            {"name": "vs_web_443",    "full_path": "/Common/vs_web_443",
+             "rules": ["irule_xff_insert", "irule_ssl_redirect"]},
+            {"name": "vs_public_443", "full_path": "/Common/vs_public_443",
+             "rules": ["irule_geo_block", "irule_xff_insert"]},
+        ],
+    },
+    # ── DMZ / perimeter (external-facing, higher bot/error rate) ─────────────
+    {
+        "host":  "bigip-dmz.example.com",
+        "scale": 0.7,
+        "virtual_servers": [
+            {"name": "vs_external_443", "full_path": "/DMZ/vs_external_443",
+             "rules": ["irule_geo_block", "irule_bot_detect", "irule_rate_limit"]},
+            {"name": "vs_api_public",   "full_path": "/DMZ/vs_api_public",
+             "rules": ["irule_jwt_validate", "irule_bot_detect", "irule_xff_insert"]},
+        ],
+    },
+    # ── Corporate VPN / remote-access ────────────────────────────────────────
+    {
+        "host":  "bigip-vpn.example.com",
+        "scale": 0.45,
+        "virtual_servers": [
+            {"name": "vs_vpn_443",    "full_path": "/Common/vs_vpn_443",
+             "rules": ["irule_xff_insert", "irule_header_sanitize"]},
+            {"name": "vs_remote_api", "full_path": "/Common/vs_remote_api",
+             "rules": ["irule_jwt_validate", "irule_log_hsl", "irule_rate_limit"]},
+        ],
+    },
+    # ── Development environment ───────────────────────────────────────────────
+    {
+        "host":  "bigip-dev.example.com",
+        "scale": 0.18,
+        "virtual_servers": [
+            {"name": "vs_dev_web", "full_path": "/Dev/vs_dev_web",
+             "rules": ["irule_xff_insert", "irule_uri_rewrite", "irule_maintenance_page"]},
+            {"name": "vs_dev_api", "full_path": "/Dev/vs_dev_api",
+             "rules": ["irule_jwt_validate", "irule_rate_limit"]},
+        ],
+    },
+    # ── Staging environment ────────────────────────────────────────────────────
+    {
+        "host":  "bigip-staging.example.com",
+        "scale": 0.30,
+        "virtual_servers": [
+            {"name": "vs_stg_web", "full_path": "/Staging/vs_stg_web",
+             "rules": ["irule_xff_insert", "irule_ssl_redirect", "irule_rate_limit"]},
+            {"name": "vs_stg_api", "full_path": "/Staging/vs_stg_api",
+             "rules": ["irule_header_sanitize", "irule_jwt_validate", "irule_log_hsl"]},
+            {"name": "vs_stg_uri", "full_path": "/Staging/vs_stg_uri",
+             "rules": ["irule_uri_rewrite"]},
+        ],
+    },
+    # ── CDN edge (high traffic) ───────────────────────────────────────────────
+    {
+        "host":  "bigip-cdn-edge.example.com",
+        "scale": 2.6,
+        "virtual_servers": [
+            {"name": "vs_cdn_443",  "full_path": "/CDN/vs_cdn_443",
+             "rules": ["irule_xff_insert", "irule_geo_block", "irule_bot_detect",
+                       "irule_rate_limit"]},
+            {"name": "vs_cdn_api",  "full_path": "/CDN/vs_cdn_api",
+             "rules": ["irule_bot_detect", "irule_rate_limit", "irule_log_hsl"]},
+            {"name": "vs_cdn_rewrite", "full_path": "/CDN/vs_cdn_rewrite",
+             "rules": ["irule_uri_rewrite", "irule_xff_insert"]},
+        ],
+    },
+    # ── Lab (unreachable) ─────────────────────────────────────────────────────
+    {
+        "host":  "bigip-lab.example.com",
+        "error": "Connection refused — device offline",
+        "scale": 0,
+        "virtual_servers": [],
     },
 ]
 
-# ── Build manifest ────────────────────────────────────────────────────────────
+
+# ── Build manifest ─────────────────────────────────────────────────────────────
 
 print("Generating one week of 5-minute polling data …")
 
-irules_data: dict = {}
+irules_data: dict   = {}
 device_records: list = []
 
 for dev in DEVICES:
+    if dev.get("error"):
+        device_records.append({
+            "host": dev["host"],
+            "error": dev["error"],
+            "virtual_servers": [],
+        })
+        continue
+
+    scale = dev.get("scale", 1.0)
     vs_list = []
+
     for vs in dev["virtual_servers"]:
         rule_keys = []
         for short_name in vs["rules"]:
-            rule_path = f"/Common/{short_name}"
-            key = irule_key(dev["host"], rule_path)
+            partition = vs["full_path"].split("/")[1] if "/" in vs["full_path"] else "Common"
+            rule_path = f"/{partition}/{short_name}"
+            # Unique key per device + path
+            key = f"{dev['host']}::{rule_path}"
+
             if key not in irules_data:
-                analysis_text = AI_ANALYSES.get(short_name)
-                code          = IRULES.get(short_name, "# source not available")
-                history       = generate_stats_history(short_name)
-                latest        = history[-1]
+                # Deterministic seed per device+irule so histories are reproducible
+                seed = int(content_hash(f"{dev['host']}::{short_name}")[:8], 16)
+
+                code     = IRULES.get(short_name, "# source not available")
+                history  = generate_stats_history(short_name, scale=scale, seed=seed)
+                latest   = history[-1]
                 stats = {
                     "total_executions": latest["total_executions"],
-                    "failures":         sum(h["failures"] for h in history),
-                    "aborts":           sum(h["aborts"]   for h in history),
-                    "events":           {},
+                    "failures":  sum(h["failures"] for h in history),
+                    "aborts":    sum(h["aborts"]   for h in history),
+                    "events":    {},
                 }
+                analysis_text = AI_ANALYSES.get(short_name)
                 irules_data[key] = {
-                    "host":            dev["host"],
-                    "path":            rule_path,
-                    "file":            f"irule_output/irules/"
-                                       f"{dev['host'].replace('.','_')}__{short_name}.tcl",
-                    "code":            code,
-                    "content_hash":    content_hash(code),
-                    "duplicate_keys":  [],
-                    "orphan":          False,
-                    "stats":           stats,
-                    "stats_history":   history,
-                    "xc_library":      None,
+                    "host":        dev["host"],
+                    "path":        rule_path,
+                    "file":        f"irule_output/{dev['host'].replace('.','_')}__{short_name}.tcl",
+                    "code":        code,
+                    "content_hash": content_hash(code),
+                    "duplicate_keys": [],
+                    "orphan":      False,
+                    "stats":       stats,
+                    "stats_history": history,
+                    "xc_library":  None,
                     "ai_analysis": {
                         "status":   "success" if analysis_text else "failed",
                         "analysis": analysis_text or "Analysis not available.",
                         "provider": "anthropic",
                         "model":    "claude-sonnet-4-6",
                     },
-                    "ai_analysis_file": (
-                        f"irule_output/irules/"
-                        f"{dev['host'].replace('.','_')}__{short_name}.analysis.txt"
-                        if analysis_text else None
-                    ),
+                    "ai_analysis_file": None,
                 }
             rule_keys.append(key)
+
         vs_list.append({
-            "name":       vs["name"],
-            "full_path":  vs["full_path"],
-            "partition":  vs["partition"],
-            "rule_keys":  rule_keys,
+            "name":      vs["name"],
+            "full_path": vs["full_path"],
+            "partition": vs["full_path"].split("/")[1] if "/" in vs["full_path"] else "Common",
+            "rule_keys": rule_keys,
         })
+
     device_records.append({"host": dev["host"], "error": None,
                             "virtual_servers": vs_list})
 
 find_duplicate_irules(irules_data)
 
-# Compute status after duplicates are resolved
 for entry in irules_data.values():
     entry["irule_status"] = compute_irule_status(entry)
 
 manifest = {"devices": device_records, "irules": irules_data}
 
-out    = Path("irule_output")
+out = Path("irule_output")
 out.mkdir(exist_ok=True)
+
+# Load DB connection so build_html can attach any cached SNow refs
+db_path = out / "irule_discovery.db"
+conn = open_db(out)
+init_db(conn)
+
 viewer = out / "irule_viewer.html"
-viewer.write_text(build_html(manifest), encoding="utf-8")
+viewer.write_text(build_html(manifest, conn), encoding="utf-8")
+conn.close()
 
 total_pts = sum(len(e["stats_history"]) for e in irules_data.values())
-print(f"  {len(irules_data)} iRules · {total_pts:,} stat data points")
+unique_irules = len({e["content_hash"] for e in irules_data.values()})
+print(f"  {len(DEVICES)} devices · {len(irules_data)} iRule instances "
+      f"({unique_irules} unique) · {total_pts:,} stat data points")
 print(f"Demo viewer → {viewer.resolve()}")
 print(f"Open with:    open '{viewer.resolve()}'")
