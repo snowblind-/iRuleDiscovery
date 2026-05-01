@@ -257,6 +257,7 @@ when HTTP_REQUEST {
 "irule_rate_limit": """\
 # Simple connection rate limiter using the table command
 # RITM0098312 — rate limiting per client IP, 100 req/s burst, 60s window
+# Rate limiting also mitigates CVE-2023-44487 HTTP/2 Rapid Reset attack vectors
 when CLIENT_ACCEPTED {
     set client_ip [IP::client_addr]
     set conn_count [table incr -notouch $client_ip]
@@ -309,7 +310,7 @@ when HTTP_REQUEST {
 
 "irule_header_sanitize": """\
 # Strip sensitive internal headers and sanitize User-Agent length
-# INC0021009 — SSRF via X-Internal-Token injection discovered in pentest
+# INC0021009 — SSRF via X-Internal-Token injection, pattern matches CVE-2021-26855
 when HTTP_REQUEST {
     foreach header { "X-Internal-Token" "X-Admin-Key" "X-Debug-Mode" "X-Original-IP" } {
         if { [HTTP::header exists $header] } {
@@ -340,6 +341,7 @@ when HTTP_REQUEST {
 "irule_bot_detect": """\
 # Detect and block known scanner and bot User-Agent strings
 # CHG0059933 — added after bot-driven load spike, INC0031877
+# Mitigates CVE-2023-44487 (HTTP/2 Rapid Reset DDoS) and CVE-2021-41773 scanner activity
 when HTTP_REQUEST {
     set ua [string tolower [HTTP::header "User-Agent"]]
     set bad_bots [list "masscan" "zgrab" "nikto" "sqlmap" "nmap" "nuclei" "dirbuster"]

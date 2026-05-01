@@ -1290,6 +1290,36 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .ft-dot.att  { background: rgba(56,189,248,0.18); color: #7dd3fc; }
   .fleet-empty { grid-column: 1/-1; text-align: center; color: #4b5563; font-size: 0.85rem; padding: 60px 0; }
 
+  /* ── Search / filter bar ── */
+  #search-bar { display: flex; align-items: center; gap: 10px; padding: 7px 14px; background: #0d1117; border-bottom: 1px solid #1e2638; flex-shrink: 0; }
+  #search-wrap { display: flex; align-items: center; flex: 1; background: #161926; border: 1px solid #2d3148; border-radius: 6px; padding: 0 10px; gap: 6px; transition: border-color 0.15s; }
+  #search-wrap:focus-within { border-color: #a78bfa; }
+  #search-icon { color: #4b5563; font-style: normal; flex-shrink: 0; }
+  #search-input { flex: 1; background: none; border: none; color: #94a3b8; font-size: 0.78rem; padding: 6px 0; outline: none; min-width: 0; }
+  #search-input::placeholder { color: #374151; }
+  #search-ai-btn { background: #1a1430; border: 1px solid #4c1d95; color: #a78bfa; border-radius: 4px; padding: 3px 10px; font-size: 0.70rem; font-weight: 700; cursor: pointer; flex-shrink: 0; white-space: nowrap; }
+  #search-ai-btn:hover { background: #231944; border-color: #7c3aed; }
+  #search-ai-btn.searching { background: #1a1430; border-color: #7c3aed; animation: pulse-ai 1s infinite; }
+  @keyframes pulse-ai { 0%,100%{opacity:1} 50%{opacity:0.5} }
+  #search-clear-btn { background: none; border: none; color: #4b5563; cursor: pointer; font-size: 0.85rem; padding: 2px 6px; flex-shrink: 0; }
+  #search-clear-btn:hover { color: #94a3b8; }
+  #search-status { font-size: 0.70rem; color: #4b5563; white-space: nowrap; }
+  #ollama-dot { width: 8px; height: 8px; border-radius: 50%; background: #374151; flex-shrink: 0; }
+  #ollama-dot.online  { background: #22c55e; box-shadow: 0 0 4px #22c55e; }
+  #ollama-dot.offline { background: #4b5563; }
+  #filter-banner { display: none; padding: 5px 14px; background: #1a1430; border-bottom: 1px solid #4c1d95; font-size: 0.72rem; color: #c4b5fd; align-items: center; gap: 10px; flex-shrink: 0; }
+  #filter-banner.active { display: flex; }
+  #filter-summary { flex: 1; }
+  #filter-clear-btn { background: none; border: 1px solid #4c1d95; color: #a78bfa; border-radius: 4px; padding: 2px 8px; cursor: pointer; font-size: 0.68rem; }
+  #filter-clear-btn:hover { background: #231944; }
+
+  /* ── Filter overlay on force graph and sankey ── */
+  .node.filter-dim   { opacity: 0.08 !important; pointer-events: none; }
+  .node.filter-hi circle { filter: brightness(1.6) drop-shadow(0 0 5px currentColor) !important; }
+  .link.filter-dim   { opacity: 0.04 !important; }
+  .sk-node.filter-dim, .sk-link.filter-dim { opacity: 0.06 !important; }
+  .sk-node.filter-hi  rect { filter: brightness(1.5); }
+
   /* ── ServiceNow section divider ── */
   #snow-section-divider { display: none; background: #060f1c; border-top: 2px solid #0c4a6e; padding: 6px 14px; font-size: 0.68rem; font-weight: 700; color: #38bdf8; text-transform: uppercase; letter-spacing: 0.06em; cursor: pointer; user-select: none; flex-shrink: 0; align-items: center; gap: 7px; transition: background 0.12s; }
   #snow-section-divider:hover { background: #091525; color: #7dd3fc; }
@@ -1320,6 +1350,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .snow-summary { font-size: 0.75rem; color: #94a3b8; line-height: 1.6; margin-bottom: 6px; }
   .snow-ctx { font-family: 'JetBrains Mono',Consolas,monospace; font-size: 0.65rem; color: #4b5563; background: #0d1117; border: 1px solid #1e2638; border-radius: 4px; padding: 6px 8px; overflow-x: auto; white-space: pre; line-height: 1.5; }
   .snow-empty { color: #4b5563; font-size: 0.80rem; text-align: center; padding: 40px 0; }
+  .cve-link { color: #fca5a5; font-weight: 700; text-decoration: none; border-bottom: 1px dashed #f87171; }
+  .cve-link:hover { color: #fecaca; border-bottom-color: #fca5a5; }
 
   /* ── Tab bar ── */
   .tab-bar { display: flex; background: #161926; border-bottom: 1px solid #2d3148; padding: 0 16px; flex-shrink: 0; gap: 2px; }
@@ -1346,6 +1378,21 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <h1>BIG-IP iRule Discovery</h1>
   <div id="summary"></div>
 </header>
+
+<div id="search-bar">
+  <div id="search-wrap">
+    <span id="search-icon">&#128269;</span>
+    <input id="search-input" type="text" placeholder="Filter iRules — type to search, Enter for AI semantic search&#8230;" autocomplete="off" spellcheck="false" />
+    <button id="search-ai-btn" title="Semantic search via local Ollama (requires nomic-embed-text model)">&#129504; AI</button>
+    <button id="search-clear-btn" title="Clear filter">&#10005;</button>
+  </div>
+  <div id="search-status"></div>
+  <div id="ollama-dot" title="Checking Ollama&#8230;"></div>
+</div>
+<div id="filter-banner">
+  <span id="filter-summary"></span>
+  <button id="filter-clear-btn" onclick="clearAllFilters()">&#10005; Clear</button>
+</div>
 
 <div class="tab-bar">
   <button class="tab-btn active" id="tab-fleet"  onclick="switchTab('fleet')">&#9783; Device Fleet</button>
@@ -1961,6 +2008,14 @@ const TYPE_COLORS = {
 let _snowTickets  = [];
 let _snowIRuleName = '';
 
+function linkifyCVE(text) {
+  if (!text) return text;
+  return String(text).replace(
+    /\bCVE-\d{4}-\d{4,7}\b/gi,
+    cve => `<a class="cve-link" href="https://nvd.nist.gov/vuln/detail/${cve.toUpperCase()}" target="_blank" rel="noopener" title="View ${cve.toUpperCase()} on NVD">${cve.toUpperCase()}</a>`
+  );
+}
+
 function _renderTickets(tickets) {
   if (!tickets.length) return '<div class="snow-empty">No ServiceNow references found.</div>';
   return tickets.map(t => {
@@ -1971,15 +2026,18 @@ function _renderTickets(tickets) {
     const numEl = href
       ? `<a class="snow-num" href="${href}" target="_blank" rel="noopener">${t.ticket_number}</a>`
       : `<span class="snow-num">${t.ticket_number}</span>`;
-    const ctx = t.context_snippet
-      ? `<div class="snow-ctx">${t.context_snippet.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>`
+    const ctxEscaped = t.context_snippet
+      ? t.context_snippet.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      : '';
+    const ctx = ctxEscaped
+      ? `<div class="snow-ctx">${linkifyCVE(ctxEscaped)}</div>`
       : '';
     return `<div class="snow-ticket" style="border-left-color:${color}">
       <div class="snow-ticket-header">
         ${numEl}
         <span class="snow-type-badge" style="background:${color}22;color:${color}">${t.ticket_type}</span>
       </div>
-      ${t.llm_summary ? `<div class="snow-summary">${t.llm_summary}</div>` : ''}
+      ${t.llm_summary ? `<div class="snow-summary">${linkifyCVE(t.llm_summary)}</div>` : ''}
       ${ctx}
     </div>`;
   }).join('');
@@ -2201,6 +2259,194 @@ function makeVResize(handle, pane, container) {
   });
 }
 
+// ── Search / Filter system ───────────────────────────────────────────────────
+// activeFilter: null = no filter, otherwise Set of content_hashes that match
+let activeFilter = null;
+let ollamaOnline  = false;
+
+// Check Ollama availability
+(async () => {
+  try {
+    const r = await fetch('http://localhost:11434/api/tags', { signal: AbortSignal.timeout(2000) });
+    ollamaOnline = r.ok;
+  } catch {}
+  const dot = document.getElementById('ollama-dot');
+  dot.className = ollamaOnline ? 'online' : 'offline';
+  dot.title = ollamaOnline ? 'Ollama online — AI search available' : 'Ollama offline — text search only';
+})();
+
+function cosineSim(a, b) {
+  let dot = 0, ma = 0, mb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i]*b[i]; ma += a[i]*a[i]; mb += b[i]*b[i]; }
+  return dot / (Math.sqrt(ma) * Math.sqrt(mb) + 1e-10);
+}
+
+function textSearch(query) {
+  if (!query.trim()) return null;
+  const q = query.toLowerCase();
+  const hashes = new Set();
+  Object.values(DATA.irules).forEach(rd => {
+    const blob = [
+      rd.path || '', rd.code || '',
+      (rd.ai_analysis && rd.ai_analysis.analysis) || '',
+      ...(rd.servicenow_tickets || []).map(t =>
+        (t.ticket_number || '') + ' ' + (t.llm_summary || '') + ' ' + (t.context_snippet || '')),
+    ].join(' ').toLowerCase();
+    if (blob.includes(q)) hashes.add(rd.content_hash);
+  });
+  return hashes.size ? hashes : new Set();
+}
+
+async function semanticSearch(query) {
+  try {
+    const r = await fetch('http://localhost:11434/api/embeddings', {
+      method: 'POST', signal: AbortSignal.timeout(12000),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'nomic-embed-text', prompt: query }),
+    });
+    if (!r.ok) return null;
+    const qVec = (await r.json()).embedding;
+    const embs = DATA.embeddings || {};
+    const scored = Object.entries(embs)
+      .map(([hash, vec]) => ({ hash, s: cosineSim(qVec, vec) }))
+      .sort((a, b) => b.s - a.s);
+    const threshold = 0.72;
+    const hits = scored.filter(x => x.s >= threshold).slice(0, 10);
+    if (!hits.length) hits.push(...scored.slice(0, 3));
+    return new Set(hits.map(x => x.hash));
+  } catch { return null; }
+}
+
+function setFilter(hashSet, label) {
+  activeFilter = hashSet;
+  const banner  = document.getElementById('filter-banner');
+  const summary = document.getElementById('filter-summary');
+
+  if (!hashSet || hashSet.size === 0) {
+    clearAllFilters();
+    return;
+  }
+
+  // Compute matching stats
+  const matchingKeys = Object.entries(DATA.irules)
+    .filter(([, rd]) => hashSet.has(rd.content_hash)).map(([k]) => k);
+  const matchingHosts = new Set();
+  DATA.devices.forEach(dev =>
+    (dev.virtual_servers || []).forEach(vs =>
+      (vs.rule_keys || []).forEach(rk => {
+        if (matchingKeys.includes(rk)) matchingHosts.add(dev.host);
+      })));
+  const unique = new Set(matchingKeys.map(k => DATA.irules[k]?.content_hash)).size;
+  summary.textContent = `${label || 'Filter active'} — ${unique} iRule${unique !== 1 ? 's' : ''} across ${matchingHosts.size} device${matchingHosts.size !== 1 ? 's' : ''}`;
+  banner.classList.add('active');
+
+  applyForceFilter();
+  applySankeyFilter();
+  if (fleetBuilt) rerenderFleet();
+}
+
+function clearAllFilters() {
+  activeFilter = null;
+  document.getElementById('filter-banner').classList.remove('active');
+  document.getElementById('search-status').textContent = '';
+  document.getElementById('search-input').value = '';
+  document.getElementById('search-clear-btn').style.display = 'none';
+  applyForceFilter();
+  applySankeyFilter();
+  if (fleetBuilt) rerenderFleet();
+}
+
+function applyForceFilter() {
+  if (!activeFilter) {
+    nodeSel.classed('filter-dim', false).classed('filter-hi', false);
+    linkSel.classed('filter-dim', false);
+    return;
+  }
+  const matchKeys = new Set(
+    Object.entries(DATA.irules)
+      .filter(([, rd]) => activeFilter.has(rd.content_hash)).map(([k]) => k));
+  const visible = new Set(matchKeys);
+  links.forEach(l => {
+    const s = l.source.id ?? l.source, t = l.target.id ?? l.target;
+    if (matchKeys.has(t)) {
+      visible.add(s);
+      links.forEach(ll => { if ((ll.target.id ?? ll.target) === s) visible.add(ll.source.id ?? ll.source); });
+    }
+  });
+  nodeSel.classed('filter-dim', n => !visible.has(n.id)).classed('filter-hi', n => matchKeys.has(n.id));
+  linkSel.classed('filter-dim', l => !visible.has(l.source.id ?? l.source) || !visible.has(l.target.id ?? l.target));
+}
+
+let _sankeyGSel = null;
+function applySankeyFilter() {
+  if (!_sankeyGSel) return;
+  if (!activeFilter) {
+    _sankeyGSel.selectAll('.sk-node,.sk-link').classed('filter-dim', false).classed('filter-hi', false);
+    return;
+  }
+  const matchKeys = new Set(
+    Object.entries(DATA.irules)
+      .filter(([, rd]) => activeFilter.has(rd.content_hash)).map(([k]) => k));
+  _sankeyGSel.selectAll('.sk-node').classed('filter-dim', d => {
+    if (d.type === 'irule')  return !matchKeys.has(d.key);
+    if (d.type === 'vs')     return !d.rule_keys?.some(k => matchKeys.has(k));
+    if (d.type === 'device') return !DATA.devices.find(dv => dv.host === d.name)
+      ?.virtual_servers?.flatMap(v => v.rule_keys || []).some(k => matchKeys.has(k));
+    return false;
+  }).classed('filter-hi', d => d.type === 'irule' && matchKeys.has(d.key));
+  _sankeyGSel.selectAll('.sk-link').classed('filter-dim', d => {
+    const t = d.target; return t.type === 'irule' && !matchKeys.has(t.key);
+  });
+}
+
+function rerenderFleet() {
+  // Re-invoke render() inside buildFleet closure by dispatching a synthetic input
+  const inp = document.getElementById('fleet-search');
+  if (inp) inp.dispatchEvent(new Event('input'));
+}
+
+// Wire up search input
+document.getElementById('search-input').addEventListener('input', e => {
+  const q = e.target.value;
+  document.getElementById('search-clear-btn').style.display = q ? 'inline' : 'none';
+  if (!q) { clearAllFilters(); return; }
+  const h = textSearch(q);
+  setFilter(h, `"${q}"`);
+  document.getElementById('search-status').textContent =
+    h && h.size ? `${h.size} match${h.size !== 1 ? 'es' : ''}` : 'no matches';
+});
+
+document.getElementById('search-input').addEventListener('keydown', async e => {
+  if (e.key !== 'Enter') return;
+  const q = e.target.value.trim();
+  if (!q) return;
+  if (!ollamaOnline || !Object.keys(DATA.embeddings || {}).length) {
+    document.getElementById('search-status').textContent = 'AI unavailable — using text search';
+    return;
+  }
+  const btn = document.getElementById('search-ai-btn');
+  btn.classList.add('searching');
+  document.getElementById('search-status').textContent = 'Searching with AI…';
+  const h = await semanticSearch(q);
+  btn.classList.remove('searching');
+  if (h) {
+    setFilter(h, `AI: "${q}"`);
+    document.getElementById('search-status').textContent = `${h.size} semantic match${h.size !== 1 ? 'es' : ''}`;
+  } else {
+    document.getElementById('search-status').textContent = 'AI search failed — using text';
+    const ht = textSearch(q);
+    setFilter(ht, `"${q}"`);
+  }
+});
+
+document.getElementById('search-ai-btn').addEventListener('click', async () => {
+  const q = document.getElementById('search-input').value.trim();
+  if (!q) return;
+  document.getElementById('search-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+});
+
+document.getElementById('search-clear-btn').addEventListener('click', clearAllFilters);
+
 // ── Tab switching ────────────────────────────────────────────────────────────
 let forceEverShown = false;
 
@@ -2323,6 +2569,14 @@ function buildFleet() {
     const filtered = sortDevices(allDevices.filter(d => {
       if (activeStatus !== 'all' && d.rolledStatus !== activeStatus) return false;
       if (term && !d.host.toLowerCase().includes(term)) return false;
+      // Global search filter: only show devices with matching iRules
+      if (activeFilter) {
+        const matchKeys = Object.entries(DATA.irules)
+          .filter(([, rd]) => activeFilter.has(rd.content_hash)).map(([k]) => k);
+        const hasMatch = DATA.devices.find(dv => dv.host === d.host)
+          ?.virtual_servers?.flatMap(v => v.rule_keys || []).some(k => matchKeys.includes(k));
+        if (!hasMatch) return false;
+      }
       return true;
     }));
 
@@ -2405,7 +2659,7 @@ function buildSankey() {
       const vid = 'vs::' + dev.host + '::' + vs.full_path;
       if (!(vid in idx)) {
         idx[vid] = ni++;
-        rawNodes.push({ id: vid, name: vs.name, type: 'vs' });
+        rawNodes.push({ id: vid, name: vs.name, type: 'vs', rule_keys: vs.rule_keys || [] });
       }
       const rc = (vs.rule_keys || []).length;
       rawLinks.push({ source: idx[did], target: idx[vid], value: rc || 1 });
@@ -2414,7 +2668,7 @@ function buildSankey() {
         if (!(rk in idx)) {
           idx[rk] = ni++;
           const rd = DATA.irules[rk];
-          rawNodes.push({ id: rk, name: rd ? rd.path.replace(/^.*\//, '') : rk, type: 'irule' });
+          rawNodes.push({ id: rk, name: rd ? rd.path.replace(/^.*\//, '') : rk, type: 'irule', key: rk });
         }
         rawLinks.push({ source: idx[vid], target: idx[rk], value: 1 });
       });
@@ -2427,7 +2681,7 @@ function buildSankey() {
     const devId = 'dev::' + rd.host;
     if (!(devId in idx) || rk in idx) return;
     idx[rk] = ni++;
-    rawNodes.push({ id: rk, name: rd.path.replace(/^.*\//, ''), type: 'irule' });
+    rawNodes.push({ id: rk, name: rd.path.replace(/^.*\//, ''), type: 'irule', key: rk });
     rawLinks.push({ source: idx[devId], target: idx[rk], value: 0.4 });
   });
 
@@ -2454,6 +2708,7 @@ function buildSankey() {
   // Links
   skG.append('g').attr('fill', 'none')
     .selectAll('path').data(links).join('path')
+      .attr('class', 'sk-link')
       .attr('d', d3.sankeyLinkHorizontal())
       .attr('stroke',         l => skNodeColor(l.source))
       .attr('stroke-width',   l => Math.max(1.5, l.width))
@@ -2467,7 +2722,7 @@ function buildSankey() {
       .on('mouseout',  function() { d3.select(this).attr('stroke-opacity', 0.18); skTip.style.opacity=0; });
 
   // Nodes
-  const ng = skG.append('g').selectAll('g').data(nodes).join('g');
+  const ng = skG.append('g').selectAll('g').data(nodes).join('g').attr('class', 'sk-node');
 
   ng.append('rect')
     .attr('x', d => d.x0).attr('y', d => d.y0)
@@ -2538,6 +2793,8 @@ function buildSankey() {
     .attr('font-size', '10px').attr('font-weight', '700')
     .attr('fill', d => C[d.type]).attr('letter-spacing', '0.08em')
     .text(d => HDR[d.type] || d.type.toUpperCase());
+
+  _sankeyGSel = skG;
 }
 
 // ── Default tab (must be last — all let variables must be declared first) ──
@@ -2561,10 +2818,24 @@ def db_get_servicenow_refs(conn: sqlite3.Connection, content_hash: str) -> list:
         return []  # table not yet created (irule_rag.py never run)
 
 
+def db_get_embeddings(conn: sqlite3.Connection) -> dict:
+    """Return {content_hash: [float, ...]} for all indexed iRules (for client-side semantic search)."""
+    import struct
+    try:
+        rows = conn.execute(
+            "SELECT content_hash, embedding FROM irule_embeddings"
+        ).fetchall()
+        result = {}
+        for row in rows:
+            n = len(row["embedding"]) // 4
+            vec = list(struct.unpack(f"{n}f", row["embedding"]))
+            result[row["content_hash"]] = [round(v, 5) for v in vec]
+        return result
+    except sqlite3.OperationalError:
+        return {}
+
+
 def build_html(data: dict, conn: sqlite3.Connection | None = None) -> str:
-    # Enrich iRule entries with ServiceNow refs if DB connection provided.
-    # NOTE: data["irules"] is keyed by irule_key (host::path), NOT content_hash.
-    #       The actual SHA-256 content_hash is inside each entry dict.
     if conn is not None:
         for entry in data.get("irules", {}).values():
             chash = entry.get("content_hash")
@@ -2572,6 +2843,9 @@ def build_html(data: dict, conn: sqlite3.Connection | None = None) -> str:
                 refs = db_get_servicenow_refs(conn, chash)
                 if refs:
                     entry["servicenow_tickets"] = refs
+        # Include pre-computed embeddings for client-side semantic search
+        data = dict(data)
+        data["embeddings"] = db_get_embeddings(conn)
 
     # Escape </ so iRules containing </script> or </style> can't break the HTML parser.
     # \/ is valid JSON and browsers treat it identically to /.

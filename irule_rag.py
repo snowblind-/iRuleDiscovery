@@ -56,6 +56,7 @@ SNOW_PATTERN = re.compile(
     r'\b(INC|CHG|RITM|SCTASK|STASK|CTASK|TASK|REQ|PRB|CRQ|PROBLEM)\d{4,12}\b',
     re.IGNORECASE,
 )
+CVE_PATTERN = re.compile(r'\bCVE-\d{4}-\d{4,7}\b', re.IGNORECASE)
 
 SNOW_SCAN_PROMPT = """\
 You are reviewing a line from an F5 BIG-IP iRule TCL script.
@@ -254,10 +255,16 @@ def scan_irule_for_snow(code: str) -> list[dict]:
             continue
         seen.add(ticket)
         t_type = re.match(r"[A-Z]+", ticket).group()
+        snippet = _context_for_match(code, m)
+        # Append any CVE references found in the context for linkification in JS
+        cves = [c.upper() for c in CVE_PATTERN.findall(snippet)]
+        if cves:
+            cve_list = ", ".join(dict.fromkeys(cves))  # deduplicate, preserve order
+            snippet = snippet + f"\n[CVEs: {cve_list}]"
         tickets.append({
             "ticket_number":   ticket,
             "ticket_type":     t_type,
-            "context_snippet": _context_for_match(code, m),
+            "context_snippet": snippet,
             "llm_summary":     None,
         })
     return tickets
@@ -485,24 +492,17 @@ def run_rebuild_html(out_dir: Path) -> None:
     conn = open_db(out_dir)
     init_rag_tables(conn)
 
-    # Enrich each iRule entry with SNow refs.
-    # data["irules"] is keyed by irule_key (host::path); the actual SHA-256
-    # content_hash is stored inside each entry dict.
-    enriched = 0
-    for entry in data.get("irules", {}).values():
-        chash = entry.get("content_hash")
-        if not chash:
-            continue
-        rows = conn.execute(
-            "SELECT ticket_number, ticket_type, context_snippet, llm_summary "
-            "FROM servicenow_refs WHERE content_hash=? ORDER BY ticket_number",
-            (chash,),
-        ).fetchall()
-        if rows:
-            entry["servicenow_tickets"] = [dict(r) for r in rows]
-            enriched += 1
+    # Count enriched iRules for reporting
+    enriched = sum(
+        1 for entry in data.get("irules", {}).values()
+        if entry.get("content_hash") and conn.execute(
+            "SELECT 1 FROM servicenow_refs WHERE content_hash=? LIMIT 1",
+            (entry["content_hash"],),
+        ).fetchone()
+    )
 
-    html = ird.build_html(data)
+    # build_html handles SNow enrichment + embedding injection when conn is passed
+    html = ird.build_html(data, conn)
     viewer = out_dir / _VIEWER_FILE
     viewer.write_text(html, encoding="utf-8")
     print(f"✓ Viewer rebuilt — {enriched} iRule(s) with ServiceNow references")
