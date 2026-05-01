@@ -2283,7 +2283,11 @@ function cosineSim(a, b) {
 
 function textSearch(query) {
   if (!query.trim()) return null;
-  const q = query.toLowerCase();
+  // Split into individual words — all must be present (AND semantics).
+  // This lets "rate limit" match iRules containing both "rate" and "limit"
+  // anywhere in their text, regardless of adjacency.
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.length) return null;
   const hashes = new Set();
   Object.values(DATA.irules).forEach(rd => {
     const blob = [
@@ -2292,7 +2296,7 @@ function textSearch(query) {
       ...(rd.servicenow_tickets || []).map(t =>
         (t.ticket_number || '') + ' ' + (t.llm_summary || '') + ' ' + (t.context_snippet || '')),
     ].join(' ').toLowerCase();
-    if (blob.includes(q)) hashes.add(rd.content_hash);
+    if (words.every(w => blob.includes(w))) hashes.add(rd.content_hash);
   });
   return hashes.size ? hashes : new Set();
 }
