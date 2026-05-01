@@ -2281,11 +2281,35 @@ function cosineSim(a, b) {
   return dot / (Math.sqrt(ma) * Math.sqrt(mb) + 1e-10);
 }
 
+// Lightweight stemmer — strips common English suffixes so "validation"
+// matches "validate", "limiting" matches "limit", "headers" matches "header", etc.
+function _stem(w) {
+  if (w.length < 5) return w;
+  const stems = [
+    [/ations?$/,  'ate'],   // validation → validate
+    [/ings?$/,    ''],      // limiting   → limit
+    [/edly$/,     ''],      // reportedly → report
+    [/ness$/,     ''],      // darkness   → dark
+    [/ment$/,     ''],      // enforcement → enforc
+    [/ful$/,      ''],      // careful    → care
+    [/less$/,     ''],      // stateless  → state
+    [/ers?$/,     ''],      // headers    → header
+    [/ies$/,      'y'],     // countries  → country
+    [/es$/,       ''],      // matches    → match
+    [/s$/,        ''],      // limits     → limit
+  ];
+  for (const [pat, rep] of stems) {
+    const s = w.replace(pat, rep);
+    if (s.length >= 3 && s !== w) return s;
+  }
+  return w;
+}
+
 function textSearch(query) {
   if (!query.trim()) return null;
-  // Split into individual words — all must be present (AND semantics).
-  // This lets "rate limit" match iRules containing both "rate" and "limit"
-  // anywhere in their text, regardless of adjacency.
+  // Split on whitespace — ALL words must appear (AND semantics).
+  // Each word is matched exactly OR via its stem, so "validation" finds
+  // iRules containing "validate", "limiting" finds "limit", etc.
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
   if (!words.length) return null;
   const hashes = new Set();
@@ -2296,7 +2320,8 @@ function textSearch(query) {
       ...(rd.servicenow_tickets || []).map(t =>
         (t.ticket_number || '') + ' ' + (t.llm_summary || '') + ' ' + (t.context_snippet || '')),
     ].join(' ').toLowerCase();
-    if (words.every(w => blob.includes(w))) hashes.add(rd.content_hash);
+    const matches = w => blob.includes(w) || blob.includes(_stem(w));
+    if (words.every(matches)) hashes.add(rd.content_hash);
   });
   return hashes.size ? hashes : new Set();
 }
@@ -2322,16 +2347,20 @@ async function semanticSearch(query) {
 }
 
 function setFilter(hashSet, label) {
-  activeFilter = hashSet;
   const banner  = document.getElementById('filter-banner');
   const summary = document.getElementById('filter-summary');
 
+  // Zero-result query: show "no matches" but keep the typed text and current
+  // filter state — do NOT wipe out what the user typed or clear prior results.
   if (!hashSet || hashSet.size === 0) {
-    clearAllFilters();
+    // Leave activeFilter unchanged (could still be a prior valid filter)
+    banner.classList.remove('active');
     return;
   }
 
-  // Compute matching stats
+  activeFilter = hashSet;
+
+  // Compute matching stats for the banner
   const matchingKeys = Object.entries(DATA.irules)
     .filter(([, rd]) => hashSet.has(rd.content_hash)).map(([k]) => k);
   const matchingHosts = new Set();
@@ -2349,6 +2378,8 @@ function setFilter(hashSet, label) {
   if (fleetBuilt) rerenderFleet();
 }
 
+// clearAllFilters is ONLY called by explicit user action (✕ button or empty input).
+// It resets everything including the typed text.
 function clearAllFilters() {
   activeFilter = null;
   document.getElementById('filter-banner').classList.remove('active');
@@ -2415,9 +2446,16 @@ document.getElementById('search-input').addEventListener('input', e => {
   document.getElementById('search-clear-btn').style.display = q ? 'inline' : 'none';
   if (!q) { clearAllFilters(); return; }
   const h = textSearch(q);
-  setFilter(h, `"${q}"`);
-  document.getElementById('search-status').textContent =
-    h && h.size ? `${h.size} match${h.size !== 1 ? 'es' : ''}` : 'no matches';
+  const statusEl = document.getElementById('search-status');
+  if (h && h.size) {
+    setFilter(h, `"${q}"`);
+    statusEl.textContent = `${h.size} match${h.size !== 1 ? 'es' : ''}`;
+  } else {
+    // No matches: show status but don't change the active filter or clear views
+    statusEl.textContent = 'no matches';
+    statusEl.style.color = '#f87171';
+    setTimeout(() => { statusEl.style.color = ''; }, 1200);
+  }
 });
 
 document.getElementById('search-input').addEventListener('keydown', async e => {
