@@ -6,3 +6,5 @@ irule_output/
 *.env
 ai_analysis_cache.json
 upload_registry.json
+.DS_Store
+.claude/
