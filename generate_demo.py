@@ -227,6 +227,129 @@ inserts `X-Request-ID` header.
   unparseable log records if the URI contains spaces.""",
 }
 
+# ── ServiceNow reference data ─────────────────────────────────────────────────
+# Keyed by short iRule name. Each list entry becomes a row in servicenow_refs.
+# Ticket numbers match the comments already embedded in the iRule source above.
+
+SERVICENOW_REFS = {
+
+"irule_xff_insert": [
+    {
+        "ticket_number":   "CHG0042891",
+        "ticket_type":     "CHG",
+        "context_snippet": "# CHG0042891 — required for upstream application to see real client IP",
+        "llm_summary":     "Change request to insert X-Forwarded-For and X-Real-IP headers so "
+                           "upstream application servers can identify the originating client IP "
+                           "address behind the BIG-IP load balancer.",
+    },
+],
+
+"irule_ssl_redirect": [
+    {
+        "ticket_number":   "INC0018374",
+        "ticket_type":     "INC",
+        "context_snippet": "# INC0018374 — added to enforce TLS across all public virtual servers",
+        "llm_summary":     "Incident raised after security audit found plain HTTP traffic reaching "
+                           "backend servers without TLS enforcement. iRule added to redirect all "
+                           "port-80 requests to HTTPS.",
+    },
+],
+
+"irule_rate_limit": [
+    {
+        "ticket_number":   "RITM0098312",
+        "ticket_type":     "RITM",
+        "context_snippet": "# RITM0098312 — rate limiting per client IP, 100 req/s burst, 60s window",
+        "llm_summary":     "Requested item to implement connection-rate limiting using the BIG-IP "
+                           "table command. Configured for 100 connections per 60-second window per "
+                           "source IP to mitigate abuse and CVE-2023-44487 HTTP/2 Rapid Reset vectors.",
+    },
+],
+
+"irule_jwt_validate": [
+    {
+        "ticket_number":   "CHG0051209",
+        "ticket_type":     "CHG",
+        "context_snippet": "# CHG0051209 — added JWT gate for API endpoints",
+        "llm_summary":     "Change to enforce Bearer token presence on all API virtual server "
+                           "requests before forwarding to the pool. Unauthenticated requests "
+                           "receive HTTP 401.",
+    },
+    {
+        "ticket_number":   "PRB0007412",
+        "ticket_type":     "PRB",
+        "context_snippet": "# see PRB0007412 for token leak fix",
+        "llm_summary":     "Problem record documenting discovery that the X-Token-Hint header was "
+                           "being logged by upstream application servers, exposing raw Bearer tokens "
+                           "in application logs. Remediation pending review of header forwarding policy.",
+    },
+],
+
+"irule_geo_block": [
+    {
+        "ticket_number":   "CHG0038100",
+        "ticket_type":     "CHG",
+        "context_snippet": "# CHG0038100 — geo-blocking added per compliance requirement REQ0002847",
+        "llm_summary":     "Change implementing geolocation-based blocking using the BIG-IP IP "
+                           "intelligence database. Blocks requests from countries listed in the "
+                           "blocked_countries datagroup, driven by compliance requirement REQ0002847.",
+    },
+],
+
+"irule_header_sanitize": [
+    {
+        "ticket_number":   "INC0021009",
+        "ticket_type":     "INC",
+        "context_snippet": "# INC0021009 — SSRF via X-Internal-Token injection, pattern matches CVE-2021-26855",
+        "llm_summary":     "Incident reporting a successful SSRF attack via injected X-Internal-Token "
+                           "header that bypassed application-layer authentication. iRule added to strip "
+                           "sensitive internal headers at the BIG-IP layer. Matches CVE-2021-26855 "
+                           "attack pattern.",
+    },
+],
+
+"irule_uri_rewrite": [
+    {
+        "ticket_number":   "RITM0110045",
+        "ticket_type":     "RITM",
+        "context_snippet": "# RITM0110045 — v1-to-v2 migration shim, retire after Q3 cutover",
+        "llm_summary":     "Requested item to implement a transparent API version migration shim. "
+                           "Rewrites /api/v1/ paths to /api/v2/ to allow backend migration without "
+                           "client changes. Marked for retirement after Q3 cutover is complete.",
+    },
+],
+
+"irule_bot_detect": [
+    {
+        "ticket_number":   "CHG0059933",
+        "ticket_type":     "CHG",
+        "context_snippet": "# CHG0059933 — added after bot-driven load spike, INC0031877",
+        "llm_summary":     "Emergency change to implement User-Agent-based bot detection after a "
+                           "scanning bot caused a significant load spike on production. Blocks "
+                           "known scanner signatures including masscan, zgrab, nikto, and sqlmap.",
+    },
+    {
+        "ticket_number":   "INC0031877",
+        "ticket_type":     "INC",
+        "context_snippet": "# INC0031877 — bot-driven load spike triggered this change",
+        "llm_summary":     "Incident report for production load spike caused by automated scanning "
+                           "bots. Zgrab and Masscan traffic accounted for 34% of request volume "
+                           "over a 6-hour window. Root cause of CHG0059933.",
+    },
+],
+
+"irule_log_hsl": [
+    {
+        "ticket_number":   "RITM0088271",
+        "ticket_type":     "RITM",
+        "context_snippet": "# RITM0088271 — centralised request logging for SIEM ingestion",
+        "llm_summary":     "Requested item to implement high-speed UDP syslog forwarding of HTTP "
+                           "request metadata to the SIEM platform. Captures client IP, method, URI, "
+                           "HTTP status code, and request latency for every transaction.",
+    },
+],
+}
+
 # ── iRule TCL source ──────────────────────────────────────────────────────────
 
 IRULES = {
@@ -603,13 +726,10 @@ for dev in DEVICES:
         for short_name in vs["rules"]:
             partition = vs["full_path"].split("/")[1] if "/" in vs["full_path"] else "Common"
             rule_path = f"/{partition}/{short_name}"
-            # Unique key per device + path
             key = f"{dev['host']}::{rule_path}"
 
             if key not in irules_data:
-                # Deterministic seed per device+irule so histories are reproducible
                 seed = int(content_hash(f"{dev['host']}::{short_name}")[:8], 16)
-
                 code     = IRULES.get(short_name, "# source not available")
                 history  = generate_stats_history(short_name, scale=scale, seed=seed)
                 latest   = history[-1]
@@ -634,8 +754,8 @@ for dev in DEVICES:
                     "ai_analysis": {
                         "status":   "success" if analysis_text else "failed",
                         "analysis": analysis_text or "Analysis not available.",
-                        "provider": "anthropic",
-                        "model":    "claude-sonnet-4-6",
+                        "provider": None,
+                        "model":    None,
                     },
                     "ai_analysis_file": None,
                 }
@@ -661,10 +781,33 @@ manifest = {"devices": device_records, "irules": irules_data}
 out = Path("irule_output")
 out.mkdir(exist_ok=True)
 
-# Load DB connection so build_html can attach any cached SNow refs
-db_path = out / "irule_discovery.db"
 conn = open_db(out)
 init_db(conn)
+
+# ── Seed ServiceNow references into the DB ────────────────────────────────────
+# One row per unique content_hash × ticket. INSERT OR IGNORE is safe on re-run.
+now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+seen_hashes: set[str] = set()
+snow_count = 0
+for entry in irules_data.values():
+    chash     = entry.get("content_hash")
+    short_key = entry["path"].rsplit("/", 1)[-1]   # e.g. "irule_xff_insert"
+    tickets   = SERVICENOW_REFS.get(short_key, [])
+    if not chash or not tickets or chash in seen_hashes:
+        continue
+    seen_hashes.add(chash)
+    for t in tickets:
+        conn.execute(
+            "INSERT OR IGNORE INTO servicenow_refs "
+            "(content_hash, irule_path, ticket_number, ticket_type, "
+            " context_snippet, llm_summary, found_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (chash, entry["path"], t["ticket_number"], t["ticket_type"],
+             t.get("context_snippet"), t.get("llm_summary"), now_iso),
+        )
+        snow_count += 1
+conn.commit()
+print(f"  {snow_count} ServiceNow reference(s) seeded into DB")
 
 import json as _json
 manifest_path = out / "manifest.json"

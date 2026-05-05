@@ -70,7 +70,7 @@ _AI_CACHE_FILE    = "ai_analysis_cache.json"
 _DB_FILE          = "irule_discovery.db"
 
 # Minimum seconds between AI query requests (XC rate-limit guidance)
-_XC_AI_RATE_LIMIT = 20
+_XC_AI_RATE_LIMIT = 5
 
 
 # ── BIG-IP API helpers ────────────────────────────────────────────────────────
@@ -169,7 +169,7 @@ _AI_DEFAULT_MODELS = {
     "openai":     "gpt-4o",
 }
 
-# Structured analysis prompt — same for all providers
+# Prompt for Anthropic / OpenAI — structured markdown response
 _ANALYSIS_PROMPT = """\
 Analyse the following F5 BIG-IP iRule and respond with exactly these three sections using Markdown headings:
 
@@ -197,6 +197,13 @@ iRule source:
 {code}
 ```"""
 
+# Prompt for F5 XC AI Assistant — plain question format, grounded in F5 docs
+_XC_ANALYSIS_PROMPT = """\
+What does this F5 BIG-IP iRule do, and are there any best practice improvements for it based on F5 documentation?
+
+iRule:
+{code}"""
+
 
 def _truncate_code(code: str, max_chars: int) -> str:
     if len(code) <= max_chars:
@@ -211,7 +218,7 @@ def _analyze_with_xc(ai_cfg: dict, code: str, max_retries: int = 3) -> dict:
     query_code = _truncate_code(code, ai_cfg.get("max_query_chars", 8000))
     url     = _XC_AI_URL.format(tenant=ai_cfg["tenant"], namespace=ai_cfg["namespace"])
     headers = {"Authorization": f"APIToken {ai_cfg['api_key']}", "Content-Type": "application/json"}
-    payload = {"current_query": _ANALYSIS_PROMPT.format(code=query_code),
+    payload = {"current_query": _XC_ANALYSIS_PROMPT.format(code=query_code),
                "namespace": ai_cfg["namespace"]}
     retry_on = {429, 500, 503, 504}
     log = logging.getLogger(__name__)
@@ -399,7 +406,7 @@ def xc_upload_irule(tenant: str, namespace: str, api_token: str,
                 "irule-discovery/origin-host":   origin_host,
                 "irule-discovery/origin-path":   rule_path,
                 "irule-discovery/content-hash":  chash,
-                "irule-discovery/uploaded-at":   datetime.datetime.utcnow().isoformat() + "Z",
+                "irule-discovery/uploaded-at":   datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00","Z"),
             },
         },
         "spec": {"irule": code},
@@ -450,7 +457,7 @@ def xc_upload_irules(irules_data: dict, out_dir: Path, xc_cfg: dict,
     for chash, info in xc_existing.items():
         if chash not in entries:
             entry_data = {**info, "source": "sync",
-                          "uploaded_at": datetime.datetime.utcnow().isoformat() + "Z"}
+                          "uploaded_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00","Z")}
             db_save_upload(db_conn, chash, entry_data)
             entries[chash] = entry_data
             synced += 1
@@ -486,7 +493,7 @@ def xc_upload_irules(irules_data: dict, out_dir: Path, xc_cfg: dict,
             entry_data = {
                 "xc_name":      result["xc_name"],
                 "xc_namespace": namespace,
-                "uploaded_at":  datetime.datetime.utcnow().isoformat() + "Z",
+                "uploaded_at":  datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00","Z"),
                 "origin_host":  host,
                 "origin_path":  rule_path,
                 "manifest_key": key,
@@ -608,7 +615,7 @@ def init_db(conn: sqlite3.Connection) -> None:
 def _migrate_json_to_db(conn: sqlite3.Connection, out_dir: Path) -> None:
     """One-time migration of legacy JSON files into the SQLite DB."""
     import datetime
-    now = datetime.datetime.utcnow().isoformat() + "Z"
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00","Z")
 
     reg_path = out_dir / _REGISTRY_FILE
     if reg_path.exists():
@@ -685,7 +692,7 @@ def db_save_ai_result(conn: sqlite3.Connection, cache_key: str,
         "VALUES (?,?,?,?,?,?)",
         (cache_key, result.get("status",""), result.get("analysis",""),
          result.get("provider"), result.get("model"),
-         datetime.datetime.utcnow().isoformat()+"Z"))
+         datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00","Z")))
     conn.commit()
 
 
@@ -967,7 +974,7 @@ def collect_irule_stats(host: str, username: str, password: str,
 
     summary = {"host": host, "checked": 0, "updated": 0,
                "unchanged": 0, "new": 0, "errors": 0}
-    run_at  = datetime.datetime.utcnow().isoformat() + "Z"
+    run_at  = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00","Z")
 
     try:
         token = get_token(session, host, username, password)
@@ -1297,16 +1304,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   #search-icon { color: #4b5563; font-style: normal; flex-shrink: 0; }
   #search-input { flex: 1; background: none; border: none; color: #94a3b8; font-size: 0.78rem; padding: 6px 0; outline: none; min-width: 0; }
   #search-input::placeholder { color: #374151; }
-  #search-ai-btn { background: #1a1430; border: 1px solid #4c1d95; color: #a78bfa; border-radius: 4px; padding: 3px 10px; font-size: 0.70rem; font-weight: 700; cursor: pointer; flex-shrink: 0; white-space: nowrap; }
-  #search-ai-btn:hover { background: #231944; border-color: #7c3aed; }
-  #search-ai-btn.searching { background: #1a1430; border-color: #7c3aed; animation: pulse-ai 1s infinite; }
-  @keyframes pulse-ai { 0%,100%{opacity:1} 50%{opacity:0.5} }
   #search-clear-btn { background: none; border: none; color: #4b5563; cursor: pointer; font-size: 0.85rem; padding: 2px 6px; flex-shrink: 0; }
   #search-clear-btn:hover { color: #94a3b8; }
-  #search-status { font-size: 0.70rem; color: #4b5563; white-space: nowrap; }
-  #ollama-dot { width: 8px; height: 8px; border-radius: 50%; background: #374151; flex-shrink: 0; }
-  #ollama-dot.online  { background: #22c55e; box-shadow: 0 0 4px #22c55e; }
-  #ollama-dot.offline { background: #4b5563; }
   #filter-banner { display: none; padding: 5px 14px; background: #1a1430; border-bottom: 1px solid #4c1d95; font-size: 0.72rem; color: #c4b5fd; align-items: center; gap: 10px; flex-shrink: 0; }
   #filter-banner.active { display: flex; }
   #filter-summary { flex: 1; }
@@ -1382,12 +1381,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <div id="search-bar">
   <div id="search-wrap">
     <span id="search-icon">&#128269;</span>
-    <input id="search-input" type="text" placeholder="Filter iRules — type to search, Enter for AI semantic search&#8230;" autocomplete="off" spellcheck="false" />
-    <button id="search-ai-btn" title="Semantic search via local Ollama (requires nomic-embed-text model)">&#129504; AI</button>
+    <input id="search-input" type="text" placeholder="Filter iRules — type to search&#8230;" autocomplete="off" spellcheck="false" />
     <button id="search-clear-btn" title="Clear filter">&#10005;</button>
   </div>
-  <div id="search-status"></div>
-  <div id="ollama-dot" title="Checking Ollama&#8230;"></div>
 </div>
 <div id="filter-banner">
   <span id="filter-summary"></span>
@@ -2262,24 +2258,6 @@ function makeVResize(handle, pane, container) {
 // ── Search / Filter system ───────────────────────────────────────────────────
 // activeFilter: null = no filter, otherwise Set of content_hashes that match
 let activeFilter = null;
-let ollamaOnline  = false;
-
-// Check Ollama availability
-(async () => {
-  try {
-    const r = await fetch('http://localhost:11434/api/tags', { signal: AbortSignal.timeout(2000) });
-    ollamaOnline = r.ok;
-  } catch {}
-  const dot = document.getElementById('ollama-dot');
-  dot.className = ollamaOnline ? 'online' : 'offline';
-  dot.title = ollamaOnline ? 'Ollama online — AI search available' : 'Ollama offline — text search only';
-})();
-
-function cosineSim(a, b) {
-  let dot = 0, ma = 0, mb = 0;
-  for (let i = 0; i < a.length; i++) { dot += a[i]*b[i]; ma += a[i]*a[i]; mb += b[i]*b[i]; }
-  return dot / (Math.sqrt(ma) * Math.sqrt(mb) + 1e-10);
-}
 
 // Lightweight stemmer — strips common English suffixes so "validation"
 // matches "validate", "limiting" matches "limit", "headers" matches "header", etc.
@@ -2326,26 +2304,6 @@ function textSearch(query) {
   return hashes.size ? hashes : new Set();
 }
 
-async function semanticSearch(query) {
-  try {
-    const r = await fetch('http://localhost:11434/api/embeddings', {
-      method: 'POST', signal: AbortSignal.timeout(12000),
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'nomic-embed-text', prompt: query }),
-    });
-    if (!r.ok) return null;
-    const qVec = (await r.json()).embedding;
-    const embs = DATA.embeddings || {};
-    const scored = Object.entries(embs)
-      .map(([hash, vec]) => ({ hash, s: cosineSim(qVec, vec) }))
-      .sort((a, b) => b.s - a.s);
-    const threshold = 0.72;
-    const hits = scored.filter(x => x.s >= threshold).slice(0, 10);
-    if (!hits.length) hits.push(...scored.slice(0, 3));
-    return new Set(hits.map(x => x.hash));
-  } catch { return null; }
-}
-
 function setFilter(hashSet, label) {
   const banner  = document.getElementById('filter-banner');
   const summary = document.getElementById('filter-summary');
@@ -2383,7 +2341,6 @@ function setFilter(hashSet, label) {
 function clearAllFilters() {
   activeFilter = null;
   document.getElementById('filter-banner').classList.remove('active');
-  document.getElementById('search-status').textContent = '';
   document.getElementById('search-input').value = '';
   document.getElementById('search-clear-btn').style.display = 'none';
   applyForceFilter();
@@ -2446,45 +2403,9 @@ document.getElementById('search-input').addEventListener('input', e => {
   document.getElementById('search-clear-btn').style.display = q ? 'inline' : 'none';
   if (!q) { clearAllFilters(); return; }
   const h = textSearch(q);
-  const statusEl = document.getElementById('search-status');
   if (h && h.size) {
     setFilter(h, `"${q}"`);
-    statusEl.textContent = `${h.size} match${h.size !== 1 ? 'es' : ''}`;
-  } else {
-    // No matches: show status but don't change the active filter or clear views
-    statusEl.textContent = 'no matches';
-    statusEl.style.color = '#f87171';
-    setTimeout(() => { statusEl.style.color = ''; }, 1200);
   }
-});
-
-document.getElementById('search-input').addEventListener('keydown', async e => {
-  if (e.key !== 'Enter') return;
-  const q = e.target.value.trim();
-  if (!q) return;
-  if (!ollamaOnline || !Object.keys(DATA.embeddings || {}).length) {
-    document.getElementById('search-status').textContent = 'AI unavailable — using text search';
-    return;
-  }
-  const btn = document.getElementById('search-ai-btn');
-  btn.classList.add('searching');
-  document.getElementById('search-status').textContent = 'Searching with AI…';
-  const h = await semanticSearch(q);
-  btn.classList.remove('searching');
-  if (h) {
-    setFilter(h, `AI: "${q}"`);
-    document.getElementById('search-status').textContent = `${h.size} semantic match${h.size !== 1 ? 'es' : ''}`;
-  } else {
-    document.getElementById('search-status').textContent = 'AI search failed — using text';
-    const ht = textSearch(q);
-    setFilter(ht, `"${q}"`);
-  }
-});
-
-document.getElementById('search-ai-btn').addEventListener('click', async () => {
-  const q = document.getElementById('search-input').value.trim();
-  if (!q) return;
-  document.getElementById('search-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
 });
 
 document.getElementById('search-clear-btn').addEventListener('click', clearAllFilters);
@@ -2860,22 +2781,6 @@ def db_get_servicenow_refs(conn: sqlite3.Connection, content_hash: str) -> list:
         return []  # table not yet created (irule_rag.py never run)
 
 
-def db_get_embeddings(conn: sqlite3.Connection) -> dict:
-    """Return {content_hash: [float, ...]} for all indexed iRules (for client-side semantic search)."""
-    import struct
-    try:
-        rows = conn.execute(
-            "SELECT content_hash, embedding FROM irule_embeddings"
-        ).fetchall()
-        result = {}
-        for row in rows:
-            n = len(row["embedding"]) // 4
-            vec = list(struct.unpack(f"{n}f", row["embedding"]))
-            result[row["content_hash"]] = [round(v, 5) for v in vec]
-        return result
-    except sqlite3.OperationalError:
-        return {}
-
 
 def build_html(data: dict, conn: sqlite3.Connection | None = None) -> str:
     if conn is not None:
@@ -2885,9 +2790,6 @@ def build_html(data: dict, conn: sqlite3.Connection | None = None) -> str:
                 refs = db_get_servicenow_refs(conn, chash)
                 if refs:
                     entry["servicenow_tickets"] = refs
-        # Include pre-computed embeddings for client-side semantic search
-        data = dict(data)
-        data["embeddings"] = db_get_embeddings(conn)
 
     # Escape </ so iRules containing </script> or </style> can't break the HTML parser.
     # \/ is valid JSON and browsers treat it identically to /.
@@ -2955,8 +2857,8 @@ def main() -> None:
                     help="F5 XC API key (overrides F5_XC_API_KEY env var)")
     xc.add_argument("-c", "--max-concurrent", metavar="N", type=int, default=3,
                     help="Max concurrent XC requests (default: 3)")
-    xc.add_argument("-r", "--rate-limit",      metavar="SECS", type=float, default=20.0,
-                    help="Minimum seconds between AI query requests (default: 20)")
+    xc.add_argument("-r", "--rate-limit",      metavar="SECS", type=float, default=5.0,
+                    help="Minimum seconds between AI query requests (default: 5)")
     xc.add_argument("-q", "--max-query-chars", metavar="N",    type=int,   default=8000,
                     help="Max iRule characters sent per AI query — truncates if larger (default: 8000)")
     xc.add_argument("--upload", action="store_true",
@@ -3029,6 +2931,48 @@ def main() -> None:
 
         if lib_filled or needs_hash:
             manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
+
+        # ── Optional: re-run AI analysis if --ai-provider supplied ──────────
+        rebuild_ai_cfg = None
+        rebuild_ai_provider = args.ai_provider or os.environ.get("AI_PROVIDER")
+        if rebuild_ai_provider:
+            rebuild_api_key = args.api_key or os.environ.get("F5_XC_API_KEY")
+            rebuild_ai_key  = args.ai_key  or os.environ.get("AI_API_KEY")
+            if rebuild_ai_provider == "xc":
+                if not args.tenant:
+                    sys.exit("[!] --ai-provider xc requires --tenant (-t)")
+                if not rebuild_api_key:
+                    sys.exit("[!] --ai-provider xc requires --api-key (-k) or F5_XC_API_KEY")
+                rebuild_ai_cfg = {
+                    "provider":        "xc",
+                    "model":           None,
+                    "api_key":         rebuild_api_key,
+                    "tenant":          args.tenant,
+                    "namespace":       args.namespace,
+                    "max_concurrent":  args.max_concurrent,
+                    "rate_limit":      args.rate_limit,
+                    "max_query_chars": args.max_query_chars,
+                }
+            else:
+                env_key = ("ANTHROPIC_API_KEY" if rebuild_ai_provider == "anthropic"
+                           else "OPENAI_API_KEY")
+                resolved_key = rebuild_ai_key or os.environ.get(env_key)
+                if not resolved_key:
+                    sys.exit(f"[!] --ai-provider {rebuild_ai_provider} requires "
+                             f"--ai-key, AI_API_KEY, or {env_key}")
+                rebuild_ai_cfg = {
+                    "provider":        rebuild_ai_provider,
+                    "model":           args.ai_model or os.environ.get("AI_MODEL") or None,
+                    "api_key":         resolved_key,
+                    "max_query_chars": args.max_query_chars,
+                }
+            model_label = rebuild_ai_cfg.get("model") or "(provider default)"
+            print(f"[*] AI re-analysis — provider={rebuild_ai_provider} model={model_label}")
+            irules_dir = out_dir / "irules"
+            irules_dir.mkdir(parents=True, exist_ok=True)
+            ai_enrich_irules(irules, irules_dir, rebuild_ai_cfg, conn)
+            manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
+            print(f"[+] Manifest updated with fresh AI analysis")
 
         html_path = out_dir / "irule_viewer.html"
         html_path.write_text(build_html(manifest, conn), encoding="utf-8")
@@ -3168,7 +3112,7 @@ def main() -> None:
 
     # ── Record stats to DB and compute final status ──────────────────────────
     import datetime
-    run_at = datetime.datetime.utcnow().isoformat() + "Z"
+    run_at = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00","Z")
     for entry in irules_data.values():
         chash = entry.get("content_hash")
         stats = entry.get("stats")
