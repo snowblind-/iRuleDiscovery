@@ -784,6 +784,11 @@ out.mkdir(exist_ok=True)
 conn = open_db(out)
 init_db(conn)
 
+# ── Clear ai_cache so real-provider results don't pollute the demo viewer ─────
+conn.execute("DELETE FROM ai_cache")
+conn.commit()
+print("  ai_cache cleared")
+
 # ── Seed ServiceNow references into the DB ────────────────────────────────────
 # One row per unique content_hash × ticket. INSERT OR IGNORE is safe on re-run.
 now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
