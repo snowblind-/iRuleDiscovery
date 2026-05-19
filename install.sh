@@ -63,12 +63,17 @@ else
 fi
 
 # ── 4. Start Ollama serve ─────────────────────────────────────────────────────
+# OLLAMA_ORIGINS=* is required so the viewer (served via HTTP) can call the
+# Ollama API. Without it, Brave/Chrome block cross-origin requests.
 echo ""
-warn "Starting Ollama serve …"
+warn "Starting Ollama serve (with OLLAMA_ORIGINS=* for browser access) …"
 if curl -s --max-time 2 http://localhost:11434/api/tags &>/dev/null; then
   ok "Ollama already running"
+  warn "NOTE: Ollama must be started with OLLAMA_ORIGINS='*' for the viewer to reach it."
+  warn "      If the viewer shows 'Ollama offline', restart with:"
+  warn "      OLLAMA_ORIGINS='*' ollama serve"
 else
-  ollama serve &>/tmp/ollama-serve.log &
+  OLLAMA_ORIGINS='*' ollama serve &>/tmp/ollama-serve.log &
   OLLAMA_PID=$!
   echo -n "  Waiting for Ollama to become ready"
   for i in $(seq 1 20); do
@@ -121,13 +126,40 @@ warn "Running irule_rag.py --rebuild-html …"
 "$PYTHON" irule_rag.py --rebuild-html
 ok "Viewer rebuilt"
 
+# ── 10. Serve viewer via HTTP and open in browser ────────────────────────────
+# The viewer MUST be served over HTTP (not file://) so the browser can reach
+# the local Ollama API. file:// triggers cross-origin restrictions in all
+# modern browsers, silently blocking Ollama calls.
+echo ""
+warn "Starting HTTP server for the viewer …"
+VIEWER_PORT=8765
+cd irule_output
+"$PYTHON" -m http.server $VIEWER_PORT &>/tmp/irule-viewer.log &
+cd ..
+sleep 1
+ok "Viewer serving at http://localhost:${VIEWER_PORT}/irule_viewer.html"
+
+OS="$(uname -s)"
+if [[ "$OS" == "Darwin" ]]; then
+  open "http://localhost:${VIEWER_PORT}/irule_viewer.html" || true
+elif command -v xdg-open &>/dev/null; then
+  xdg-open "http://localhost:${VIEWER_PORT}/irule_viewer.html" || true
+fi
+
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}══════════════════════════════════════════${NC}"
 echo -e "${GREEN}  Installation complete!${NC}"
 echo -e "${GREEN}══════════════════════════════════════════${NC}"
-echo -e "  Open the viewer with:"
-echo -e "  ${YELLOW}open irule_output/irule_viewer.html${NC}"
+echo ""
+echo -e "  Viewer:  ${YELLOW}http://localhost:${VIEWER_PORT}/irule_viewer.html${NC}"
+echo -e "  Ollama:  ${YELLOW}http://localhost:11434${NC}  (OLLAMA_ORIGINS=* required)"
+echo ""
+echo -e "  To restart the viewer server later:"
+echo -e "  ${YELLOW}cd irule_output && python3 -m http.server ${VIEWER_PORT}${NC}"
+echo ""
+echo -e "  To restart Ollama with browser access:"
+echo -e "  ${YELLOW}OLLAMA_ORIGINS='*' ollama serve${NC}"
 echo ""
 
 # Make self executable
