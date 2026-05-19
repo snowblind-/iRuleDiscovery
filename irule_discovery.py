@@ -1445,9 +1445,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <div id="search-bar">
   <div id="search-wrap">
     <span id="search-icon">&#128269;</span>
-    <input id="search-input" type="text" placeholder="Filter iRules — type to search&#8230;" autocomplete="off" spellcheck="false" />
+    <input id="search-input" type="text" placeholder="Filter iRules — type to search, Enter for AI semantic search&#8230;" autocomplete="off" spellcheck="false" />
+    <button id="search-ai-btn" title="Semantic search via local Ollama (requires nomic-embed-text model)">&#129504; AI</button>
     <button id="search-clear-btn" title="Clear filter">&#10005;</button>
   </div>
+  <div id="search-status"></div>
+  <div id="ollama-dot" title="Checking Ollama&#8230;"></div>
 </div>
 <div id="filter-banner">
   <span id="filter-summary"></span>
@@ -2361,8 +2364,50 @@ function makeVResize(handle, pane, container) {
 }
 
 // ── Search / Filter system ───────────────────────────────────────────────────
-// activeFilter: null = no filter, otherwise Set of content_hashes that match
-let activeFilter = null;
+let activeFilter = null;   // null = no filter; Set<content_hash> when active
+let ollamaOnline = false;  // updated async at page load
+
+// Check Ollama availability on load
+(async () => {
+  try {
+    const r = await fetch('http://localhost:11434/api/tags',
+                          {signal: AbortSignal.timeout(2500)});
+    ollamaOnline = r.ok;
+  } catch {}
+  const dot = document.getElementById('ollama-dot');
+  if (dot) {
+    dot.className = ollamaOnline ? 'online' : 'offline';
+    dot.title = ollamaOnline
+      ? 'Ollama online — AI search + Ask AI available'
+      : 'Ollama offline — text search only (start with: ollama serve)';
+  }
+})();
+
+function cosineSim(a, b) {
+  let dot = 0, ma = 0, mb = 0;
+  for (let i = 0; i < a.length; i++) { dot+=a[i]*b[i]; ma+=a[i]*a[i]; mb+=b[i]*b[i]; }
+  return dot / (Math.sqrt(ma) * Math.sqrt(mb) + 1e-10);
+}
+
+async function semanticSearch(query) {
+  try {
+    const r = await fetch('http://localhost:11434/api/embeddings', {
+      method: 'POST', signal: AbortSignal.timeout(12000),
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({model: 'nomic-embed-text', prompt: query}),
+    });
+    if (!r.ok) return null;
+    const qVec = (await r.json()).embedding;
+    const embs  = DATA.embeddings || {};
+    const scored = Object.entries(embs)
+      .map(([hash, vec]) => ({hash, s: cosineSim(qVec, vec)}))
+      .sort((a, b) => b.s - a.s);
+    const threshold = 0.72;
+    const hits = scored.filter(x => x.s >= threshold).slice(0, 10);
+    if (!hits.length) hits.push(...scored.slice(0, 3));
+    return new Set(hits.map(x => x.hash));
+  } catch { return null; }
+}
 
 // Lightweight stemmer — strips common English suffixes so "validation"
 // matches "validate", "limiting" matches "limit", "headers" matches "header", etc.
@@ -2503,14 +2548,51 @@ function rerenderFleet() {
 }
 
 // Wire up search input
+// Wire up search bar events
 document.getElementById('search-input').addEventListener('input', e => {
   const q = e.target.value;
   document.getElementById('search-clear-btn').style.display = q ? 'inline' : 'none';
   if (!q) { clearAllFilters(); return; }
   const h = textSearch(q);
+  const statusEl = document.getElementById('search-status');
   if (h && h.size) {
     setFilter(h, `"${q}"`);
+    statusEl.textContent = `${h.size} match${h.size !== 1 ? 'es' : ''}`;
+    statusEl.style.color = '';
+  } else {
+    statusEl.textContent = 'no matches';
+    statusEl.style.color = '#f87171';
+    setTimeout(() => { statusEl.style.color = ''; }, 1200);
   }
+});
+
+document.getElementById('search-input').addEventListener('keydown', async e => {
+  if (e.key !== 'Enter') return;
+  const q = e.target.value.trim();
+  if (!q) return;
+  if (!ollamaOnline || !Object.keys(DATA.embeddings || {}).length) {
+    document.getElementById('search-status').textContent = 'AI unavailable — using text search';
+    return;
+  }
+  const btn = document.getElementById('search-ai-btn');
+  btn.classList.add('searching');
+  document.getElementById('search-status').textContent = 'Searching with AI…';
+  const h = await semanticSearch(q);
+  btn.classList.remove('searching');
+  if (h && h.size) {
+    setFilter(h, `AI: "${q}"`);
+    document.getElementById('search-status').textContent = `${h.size} semantic match${h.size !== 1 ? 'es' : ''}`;
+  } else {
+    document.getElementById('search-status').textContent = 'AI search failed — using text';
+    const ht = textSearch(q);
+    if (ht && ht.size) setFilter(ht, `"${q}"`);
+  }
+});
+
+document.getElementById('search-ai-btn').addEventListener('click', async () => {
+  const q = document.getElementById('search-input').value.trim();
+  if (!q) return;
+  document.getElementById('search-input').dispatchEvent(new KeyboardEvent('keydown', {key:'Enter',bubbles:true}));
 });
 
 document.getElementById('search-clear-btn').addEventListener('click', clearAllFilters);
@@ -3121,17 +3203,40 @@ def db_get_servicenow_refs(conn: sqlite3.Connection, content_hash: str) -> list:
 
 
 
+def db_get_embeddings(conn: sqlite3.Connection) -> dict:
+    """Return {content_hash: [float, ...]} for all indexed iRules.
+    Used by build_html to inject pre-computed vectors into the viewer for
+    client-side semantic search without needing a server round-trip.
+    """
+    import struct
+    try:
+        rows = conn.execute(
+            "SELECT content_hash, embedding FROM irule_embeddings"
+        ).fetchall()
+        result = {}
+        for row in rows:
+            n = len(row["embedding"]) // 4
+            vec = list(struct.unpack(f"{n}f", row["embedding"]))
+            result[row["content_hash"]] = [round(v, 5) for v in vec]
+        return result
+    except sqlite3.OperationalError:
+        return {}  # irule_embeddings table not yet created
+
+
 def build_html(data: dict, conn: sqlite3.Connection | None = None) -> str:
     if conn is not None:
+        # Enrich iRule entries with cached ServiceNow refs
         for entry in data.get("irules", {}).values():
             chash = entry.get("content_hash")
             if chash:
                 refs = db_get_servicenow_refs(conn, chash)
                 if refs:
                     entry["servicenow_tickets"] = refs
+        # Inject pre-computed embeddings for client-side semantic search
+        data = dict(data)
+        data["embeddings"] = db_get_embeddings(conn)
 
     # Escape </ so iRules containing </script> or </style> can't break the HTML parser.
-    # \/ is valid JSON and browsers treat it identically to /.
     safe_json = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
     return HTML_TEMPLATE.replace("__DATA__", safe_json)
 
