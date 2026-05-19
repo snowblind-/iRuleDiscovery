@@ -1297,6 +1297,70 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .ft-dot.att  { background: rgba(56,189,248,0.18); color: #7dd3fc; }
   .fleet-empty { grid-column: 1/-1; text-align: center; color: #4b5563; font-size: 0.85rem; padding: 60px 0; }
 
+  /* ── Ask AI pane ── */
+  #pane-ask { flex: 1; display: none; overflow: hidden; background: #080c12; }
+  #pane-ask.active { display: flex; }
+  /* When Ask AI is active, hide the resize handle and code panel */
+  #pane-ask.active ~ #resize-v,
+  #pane-ask.active ~ #code-panel { display: none !important; }
+
+  #ask-left  { width: 340px; min-width: 280px; flex-shrink: 0; display: flex; flex-direction: column; gap: 0; border-right: 1px solid #1e2638; background: #0a0f1a; overflow-y: auto; }
+  #ask-right { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; }
+
+  #ask-query-wrap  { padding: 16px; border-bottom: 1px solid #1e2638; flex-shrink: 0; }
+  #ask-query-label { font-size: 0.72rem; font-weight: 700; color: #a78bfa; text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 10px; }
+  #ask-input { width: 100%; background: #111827; border: 1px solid #2d3148; border-radius: 6px; color: #c4b5fd; font-size: 0.80rem; line-height: 1.55; padding: 8px 10px; resize: vertical; font-family: inherit; outline: none; box-sizing: border-box; }
+  #ask-input:focus { border-color: #7c3aed; }
+  #ask-input::placeholder { color: #374151; }
+  #ask-buttons { display: flex; align-items: center; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  #ask-submit-btn { background: #4c1d95; border: 1px solid #7c3aed; color: #e9d5ff; border-radius: 5px; padding: 5px 14px; font-size: 0.75rem; font-weight: 700; cursor: pointer; }
+  #ask-submit-btn:hover { background: #5b21b6; }
+  #ask-submit-btn:disabled { opacity: 0.4; cursor: default; }
+  #ask-stop-btn { background: #7f1d1d; border: 1px solid #b91c1c; color: #fca5a5; border-radius: 5px; padding: 5px 12px; font-size: 0.75rem; font-weight: 700; cursor: pointer; }
+  #ask-stop-btn:hover { background: #991b1b; }
+  #ask-clear-btn { background: none; border: 1px solid #2d3148; color: #4b5563; border-radius: 5px; padding: 5px 10px; font-size: 0.72rem; cursor: pointer; }
+  #ask-clear-btn:hover { color: #94a3b8; border-color: #4b5563; }
+  #ask-status { font-size: 0.68rem; color: #4b5563; flex: 1; }
+  #ask-status.running { color: #a78bfa; animation: pulse-ai 1s infinite; }
+  #ask-ollama-warn { font-size: 0.65rem; color: #f87171; }
+
+  #ask-context-wrap { padding: 12px 14px; border-bottom: 1px solid #1e2638; flex-shrink: 0; }
+  #ask-context-label { font-size: 0.65rem; font-weight: 700; color: #4b5563; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px; }
+  #ask-context-count { background: #1e2638; color: #4b5563; border-radius: 10px; padding: 1px 6px; font-size: 0.60rem; margin-left: 4px; }
+  .ask-ctx-item { display: flex; align-items: baseline; gap: 6px; padding: 5px 8px; border-radius: 5px; cursor: pointer; margin-bottom: 3px; border: 1px solid transparent; transition: background 0.12s; }
+  .ask-ctx-item:hover { background: #111827; border-color: #2d3148; }
+  .ask-ctx-rank { font-size: 0.62rem; color: #374151; font-weight: 700; width: 14px; flex-shrink: 0; }
+  .ask-ctx-name { font-family: 'JetBrains Mono',Consolas,monospace; font-size: 0.68rem; color: #a78bfa; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ask-ctx-score { font-size: 0.60rem; color: #374151; flex-shrink: 0; }
+  .ask-ctx-host { font-size: 0.60rem; color: #2d3148; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100px; }
+
+  #ask-history-wrap { padding: 12px 14px; flex-shrink: 0; }
+  #ask-history-label { font-size: 0.65rem; font-weight: 700; color: #374151; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; }
+  .ask-hist-item { font-size: 0.70rem; color: #4b5563; padding: 4px 6px; border-radius: 4px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ask-hist-item:hover { color: #94a3b8; background: #111827; }
+
+  #ask-answer-label { padding: 10px 18px 0; font-size: 0.65rem; font-weight: 700; color: #4b5563; text-transform: uppercase; letter-spacing: 0.06em; flex-shrink: 0; }
+  #ask-answer { flex: 1; overflow-y: auto; padding: 12px 20px 20px; font-family: 'Segoe UI',system-ui,sans-serif; font-size: 0.82rem; line-height: 1.75; color: #94a3b8; }
+  #ask-answer p  { margin: 4px 0 10px; }
+  #ask-answer ul, #ask-answer ol { padding-left: 22px; margin: 4px 0 10px; }
+  #ask-answer li { margin: 4px 0; }
+  #ask-answer strong, #ask-answer b { color: #c4b5fd; }
+  #ask-answer em  { color: #93c5fd; font-style: italic; }
+  #ask-answer code { background: #1a2e1a; padding: 1px 5px; border-radius: 3px; font-family: 'JetBrains Mono',Consolas,monospace; font-size: 0.72rem; color: #4ade80; }
+  #ask-answer pre  { background: #1a2e1a; border: 1px solid #2d4a2d; border-radius: 5px; padding: 8px 12px; overflow-x: auto; margin: 8px 0; }
+  #ask-answer pre code { background: none; padding: 0; color: #86efac; }
+  #ask-answer h1,#ask-answer h2,#ask-answer h3,#ask-answer h4 { color: #a78bfa; margin: 14px 0 4px; font-size: 0.90rem; font-weight: 700; }
+  #ask-answer hr { border: none; border-top: 1px solid #1e2638; margin: 12px 0; }
+  #ask-answer .ask-cursor { display: inline-block; width: 2px; height: 1em; background: #a78bfa; margin-left: 2px; animation: blink 0.7s step-end infinite; vertical-align: text-bottom; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+
+  #ask-placeholder { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; padding: 40px; }
+  .ask-ph-icon  { font-size: 3rem; opacity: 0.2; }
+  .ask-ph-title { font-size: 1rem; color: #374151; font-weight: 600; }
+  .ask-ph-examples { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; max-width: 560px; }
+  .ask-ph-chip { background: #111827; border: 1px solid #1e2638; border-radius: 20px; color: #4b5563; font-size: 0.72rem; padding: 6px 14px; cursor: pointer; transition: all 0.15s; }
+  .ask-ph-chip:hover { background: #1a1430; border-color: #4c1d95; color: #a78bfa; }
+
   /* ── Search / filter bar ── */
   #search-bar { display: flex; align-items: center; gap: 10px; padding: 7px 14px; background: #0d1117; border-bottom: 1px solid #1e2638; flex-shrink: 0; }
   #search-wrap { display: flex; align-items: center; flex: 1; background: #161926; border: 1px solid #2d3148; border-radius: 6px; padding: 0 10px; gap: 6px; transition: border-color 0.15s; }
@@ -1394,6 +1458,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <button class="tab-btn active" id="tab-fleet"  onclick="switchTab('fleet')">&#9783; Device Fleet</button>
   <button class="tab-btn"        id="tab-force"  onclick="switchTab('force')">&#11042; Force Graph</button>
   <button class="tab-btn"        id="tab-sankey" onclick="switchTab('sankey')">&#8644; Sankey Flow</button>
+  <button class="tab-btn"        id="tab-ask"    onclick="switchTab('ask')">&#129504; Ask AI</button>
 </div>
 
 <div class="main-area">
@@ -1438,6 +1503,46 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <div id="fleet-counts"></div>
       </div>
       <div id="fleet-grid"></div>
+    </div>
+
+    <div id="pane-ask">
+      <div id="ask-left">
+        <div id="ask-query-wrap">
+          <div id="ask-query-label">&#129504; Ask a question about your iRules</div>
+          <textarea id="ask-input" rows="3" placeholder="e.g. Which iRules validate JWT tokens?&#10;Which iRules modify HTTP headers?&#10;Are there any iRules with rate limiting logic?"></textarea>
+          <div id="ask-buttons">
+            <button id="ask-submit-btn" onclick="runAskQuery()">&#9654; Ask</button>
+            <button id="ask-stop-btn"   onclick="stopAskQuery()" style="display:none">&#9632; Stop</button>
+            <button id="ask-clear-btn"  onclick="clearAskPanel()">&#10005; Clear</button>
+            <span id="ask-status"></span>
+            <span id="ask-ollama-warn"></span>
+          </div>
+        </div>
+        <div id="ask-context-wrap" style="display:none">
+          <div id="ask-context-label">&#128269; Retrieved iRules <span id="ask-context-count"></span></div>
+          <div id="ask-context-list"></div>
+        </div>
+        <div id="ask-history-wrap" style="display:none">
+          <div id="ask-history-label">&#128336; Recent queries</div>
+          <div id="ask-history-list"></div>
+        </div>
+      </div>
+      <div id="ask-right">
+        <div id="ask-answer-label" style="display:none">&#127775; Answer</div>
+        <div id="ask-answer"></div>
+        <div id="ask-placeholder">
+          <div class="ask-ph-icon">&#129504;</div>
+          <div class="ask-ph-title">Ask anything about your iRules</div>
+          <div class="ask-ph-examples">
+            <div class="ask-ph-chip" onclick="askExample(this)">Which iRules handle JWT authentication?</div>
+            <div class="ask-ph-chip" onclick="askExample(this)">Are there any security-related iRules?</div>
+            <div class="ask-ph-chip" onclick="askExample(this)">Which iRules modify HTTP headers?</div>
+            <div class="ask-ph-chip" onclick="askExample(this)">Show me iRules with ServiceNow tickets</div>
+            <div class="ask-ph-chip" onclick="askExample(this)">Which iRules have rate limiting logic?</div>
+            <div class="ask-ph-chip" onclick="askExample(this)">Are there iRules deployed on multiple devices?</div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -2417,6 +2522,18 @@ function switchTab(name) {
   document.getElementById('pane-force').style.display  = name === 'force'  ? 'flex' : 'none';
   document.getElementById('pane-sankey').classList.toggle('active', name === 'sankey');
   document.getElementById('pane-fleet').classList.toggle('active',  name === 'fleet');
+  document.getElementById('pane-ask').classList.toggle('active',    name === 'ask');
+  // Ask AI hides the right code panel (via CSS sibling selector ~) but we
+  // also need to restore it when leaving Ask
+  const codePanel = document.getElementById('code-panel');
+  const resizeV   = document.getElementById('resize-v');
+  if (name === 'ask') {
+    codePanel.style.display = 'none';
+    resizeV.style.display   = 'none';
+  } else {
+    codePanel.style.display = '';
+    resizeV.style.display   = '';
+  }
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.getElementById('tab-' + name).classList.add('active');
   if (name === 'force' && !forceEverShown) {
@@ -2432,6 +2549,228 @@ function switchTab(name) {
   if (name === 'sankey' && !sankeyBuilt) buildSankey();
   if (name === 'fleet'  && !fleetBuilt)  buildFleet();
 }
+
+// ── Ask AI panel ─────────────────────────────────────────────────────────────
+const RAG_SYSTEM_PROMPT = `You are an expert F5 BIG-IP iRule analyst.
+Answer questions about the iRules provided as context.
+Be concise, technical, and accurate. Cite iRule names when relevant.
+Do not mention Ollama, LLM, or AI internals in your answer.`;
+
+let _askAbort    = null;   // AbortController for active stream
+let _askHistory  = [];     // session query history
+let _askRunning  = false;
+
+function askExample(el) {
+  document.getElementById('ask-input').value = el.textContent;
+  runAskQuery();
+}
+
+function stopAskQuery() {
+  if (_askAbort) { _askAbort.abort(); _askAbort = null; }
+  _askRunning = false;
+  document.getElementById('ask-submit-btn').disabled = false;
+  document.getElementById('ask-stop-btn').style.display = 'none';
+  const cur = document.querySelector('#ask-answer .ask-cursor');
+  if (cur) cur.remove();
+  _setAskStatus('Stopped.');
+}
+
+function clearAskPanel() {
+  stopAskQuery();
+  document.getElementById('ask-input').value    = '';
+  document.getElementById('ask-answer').innerHTML = '';
+  document.getElementById('ask-answer-label').style.display = 'none';
+  document.getElementById('ask-context-wrap').style.display = 'none';
+  document.getElementById('ask-placeholder').style.display  = 'flex';
+  document.getElementById('ask-status').textContent = '';
+  document.getElementById('ask-status').className  = '';
+}
+
+function _setAskStatus(msg, running = false) {
+  const el = document.getElementById('ask-status');
+  el.textContent = msg;
+  el.className = running ? 'running' : '';
+}
+
+function _renderAskContext(results) {
+  const wrap  = document.getElementById('ask-context-wrap');
+  const list  = document.getElementById('ask-context-list');
+  const count = document.getElementById('ask-context-count');
+  if (!results.length) { wrap.style.display = 'none'; return; }
+  count.textContent = results.length;
+  list.innerHTML = results.map((r, i) => {
+    // Find an irule entry for this content hash to get path + host
+    const entry = Object.values(DATA.irules).find(e => e.content_hash === r.hash);
+    const name  = entry ? entry.path.replace(/^.*\//, '') : r.hash.slice(0, 12);
+    const host  = entry ? entry.host : '';
+    const score = (r.score * 100).toFixed(0) + '%';
+    const key   = Object.keys(DATA.irules).find(k => DATA.irules[k].content_hash === r.hash) || '';
+    return `<div class="ask-ctx-item" onclick="jumpToIRuleKey(${JSON.stringify(key)})" title="Click to view in Force Graph">
+      <span class="ask-ctx-rank">${i + 1}.</span>
+      <span class="ask-ctx-name" title="${entry ? entry.path : ''}">${name}</span>
+      <span class="ask-ctx-score">${score}</span>
+      <span class="ask-ctx-host" title="${host}">${host.split('.')[0]}</span>
+    </div>`;
+  }).join('');
+  wrap.style.display = 'block';
+}
+
+function jumpToIRuleKey(key) {
+  if (!key) return;
+  switchTab('force');
+  requestAnimationFrame(() => {
+    const n = nodes.find(d => d.id === key);
+    if (n) { selectNode(n); showCode(n); }
+    if (n && n.x != null) {
+      const scale = 2;
+      svg.transition().duration(600)
+         .call(zoomBehavior.transform,
+               d3.zoomIdentity.translate(W/2 - n.x*scale, H/2 - n.y*scale).scale(scale));
+    }
+  });
+}
+
+function _addToHistory(query) {
+  _askHistory = [query, ..._askHistory.filter(q => q !== query)].slice(0, 6);
+  const wrap = document.getElementById('ask-history-wrap');
+  const list = document.getElementById('ask-history-list');
+  if (!_askHistory.length) { wrap.style.display = 'none'; return; }
+  list.innerHTML = _askHistory.map(q =>
+    `<div class="ask-hist-item" onclick="document.getElementById('ask-input').value=${JSON.stringify(q)};runAskQuery()" title="${q}">&#128336; ${q}</div>`
+  ).join('');
+  wrap.style.display = 'block';
+}
+
+async function runAskQuery() {
+  const query = document.getElementById('ask-input').value.trim();
+  if (!query || _askRunning) return;
+
+  // Check prerequisites
+  const warnEl = document.getElementById('ask-ollama-warn');
+  if (!ollamaOnline) {
+    warnEl.textContent = 'Ollama offline — start it with: ollama serve';
+    return;
+  }
+  const hasEmbeddings = Object.keys(DATA.embeddings || {}).length > 0;
+  if (!hasEmbeddings) {
+    warnEl.textContent = 'No embeddings — run: python3 irule_rag.py --build-index --rebuild-html';
+    return;
+  }
+  warnEl.textContent = '';
+
+  _askRunning = true;
+  document.getElementById('ask-submit-btn').disabled = true;
+  document.getElementById('ask-stop-btn').style.display = 'inline';
+  document.getElementById('ask-placeholder').style.display  = 'none';
+  document.getElementById('ask-answer-label').style.display = 'block';
+  document.getElementById('ask-answer').innerHTML = '';
+  _addToHistory(query);
+
+  // ── Step 1: embed the query ───────────────────────────────────────────────
+  _setAskStatus('Embedding query…', true);
+  let qVec;
+  try {
+    _askAbort = new AbortController();
+    const r = await fetch('http://localhost:11434/api/embeddings', {
+      method: 'POST', signal: _askAbort.signal,
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({model: 'nomic-embed-text', prompt: query}),
+    });
+    qVec = (await r.json()).embedding;
+  } catch (e) {
+    _setAskStatus(e.name === 'AbortError' ? 'Stopped.' : `Embedding failed: ${e.message}`);
+    _askRunning = false;
+    document.getElementById('ask-submit-btn').disabled = false;
+    document.getElementById('ask-stop-btn').style.display = 'none';
+    return;
+  }
+
+  // ── Step 2: rank iRules by cosine similarity ──────────────────────────────
+  _setAskStatus('Finding relevant iRules…', true);
+  const embs   = DATA.embeddings || {};
+  const scored = Object.entries(embs)
+    .map(([hash, vec]) => ({hash, score: cosineSim(qVec, vec)}))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5);
+  _renderAskContext(scored);
+
+  // ── Step 3: build context from top iRules ─────────────────────────────────
+  const contextParts = scored.map(r => {
+    const entry = Object.values(DATA.irules).find(e => e.content_hash === r.hash);
+    if (!entry) return '';
+    const code = (entry.code || '').slice(0, 2500);
+    return `--- iRule: ${entry.path} (host: ${entry.host}) ---\n${code}`;
+  }).filter(Boolean);
+  const context = contextParts.join('\n\n');
+
+  // ── Step 4: stream answer from Llama 3 ───────────────────────────────────
+  _setAskStatus('Generating answer…', true);
+  const answerEl = document.getElementById('ask-answer');
+  const cursor   = document.createElement('span');
+  cursor.className = 'ask-cursor';
+  answerEl.appendChild(cursor);
+
+  let rawText = '';
+  try {
+    _askAbort = new AbortController();
+    const resp = await fetch('http://localhost:11434/api/chat', {
+      method: 'POST', signal: _askAbort.signal,
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        model: 'llama3',
+        stream: true,
+        messages: [
+          {role: 'system',    content: RAG_SYSTEM_PROMPT},
+          {role: 'user',      content: `Context iRules:\n${context}\n\nQuestion: ${query}`},
+        ],
+      }),
+    });
+
+    const reader  = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let   buf     = '';
+
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, {stream: true});
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const chunk = JSON.parse(line);
+          const token = chunk.message?.content || '';
+          rawText += token;
+          // Re-render markdown on each chunk so formatting builds up live
+          cursor.remove();
+          answerEl.innerHTML = renderAI(rawText);
+          answerEl.appendChild(cursor);
+          answerEl.scrollTop = answerEl.scrollHeight;
+          if (chunk.done) break;
+        } catch {}
+      }
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError') {
+      answerEl.innerHTML += `<p style="color:#f87171">Error: ${e.message}</p>`;
+    }
+  }
+
+  // ── Finish ────────────────────────────────────────────────────────────────
+  cursor.remove();
+  if (rawText) answerEl.innerHTML = renderAI(rawText);
+  _askRunning = false;
+  _askAbort   = null;
+  document.getElementById('ask-submit-btn').disabled = false;
+  document.getElementById('ask-stop-btn').style.display = 'none';
+  _setAskStatus('');
+}
+
+// Enter in textarea = submit (Shift+Enter = newline)
+document.getElementById('ask-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); runAskQuery(); }
+});
 
 // ── Fleet view ───────────────────────────────────────────────────────────────
 let fleetBuilt = false;
